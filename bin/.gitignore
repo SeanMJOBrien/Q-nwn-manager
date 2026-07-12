@@ -1,0 +1,7 @@
+/.nasher/
+/dist/
+*.mod
+*.ncs
+*.erf
+*.hak
+__pycache__/
