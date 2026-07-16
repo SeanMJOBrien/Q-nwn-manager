@@ -198,6 +198,7 @@ def page(title, body):
                     for l, u in NAV_EXTRA)
     nav = ("<div class='nav'><a href='/'>Editor Home</a><a href='/areas'>Areas</a>"
            "<a href='/creatures'>Creatures</a><a href='/bics'>Characters (.bic)</a>"
+           "<a href='/module'>Module Info</a>"
            "%s</div>" % extra)
     if WIKI_SHELL:
         inner = ("<style>%s</style>%s<h1>%s</h1>%s"
@@ -234,11 +235,34 @@ LIGHT_NUM_FIELDS = [
 ]
 LIGHT_COLOR_FIELDS = ["SunAmbientColor", "SunDiffuseColor", "SunFogColor",
                       "MoonAmbientColor", "MoonDiffuseColor", "MoonFogColor"]
+# (field, gff type, hint) - all are ambientmusic.2da row indices except MusicDelay
+MUSIC_FIELDS = [
+    ("MusicDay", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicNight", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
+]
+# Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
+# sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
+AREA_FLAG_INTERIOR = 1
+AREA_FLAG_UNDERGROUND = 2
+AREA_FLAG_NATURAL = 4
 
 
 def area_resrefs(root):
     return sorted(os.path.splitext(f)[0] for f in os.listdir(root)
                   if f.endswith(".are"))
+
+
+def area_type_label(flags):
+    parts = []
+    if flags & AREA_FLAG_NATURAL:
+        parts.append("Outside")
+    if flags & AREA_FLAG_INTERIOR:
+        parts.append("Interior")
+    if flags & AREA_FLAG_UNDERGROUND:
+        parts.append("Underground")
+    return ", ".join(parts) if parts else "(unset)"
 
 
 def area_row(root, res):
@@ -248,6 +272,7 @@ def area_row(root, res):
         "name": loc_get(d, "Name"),
         "tag": getv(d, "Tag", ""),
         "tileset": getv(d, "Tileset", ""),
+        "flags": getv(d, "Flags", 0),
         "scripts": {f: getv(d, f, "") for f in AREA_SCRIPT_FIELDS},
     }
 
@@ -255,6 +280,9 @@ def area_row(root, res):
 def render_areas(root, query):
     q = (query.get("q", [""])[0]).lower()
     tileset = query.get("tileset", [""])[0]
+    f_outside = query.get("outside", [""])[0] == "1"
+    f_interior = query.get("interior", [""])[0] == "1"
+    f_underground = query.get("underground", [""])[0] == "1"
     rows = [area_row(root, r) for r in area_resrefs(root)]
     tilesets = sorted({r["tileset"] for r in rows})
     if q:
@@ -262,32 +290,52 @@ def render_areas(root, query):
                 or q in r["name"].lower() or q in r["tag"].lower()]
     if tileset:
         rows = [r for r in rows if r["tileset"] == tileset]
+    if f_outside:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_NATURAL]
+    if f_interior:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_INTERIOR]
+    if f_underground:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_UNDERGROUND]
     opts = "".join("<option value='%s'%s>%s</option>" %
                    (esc(t), " selected" if t == tileset else "", esc(t or "(any)"))
                    for t in [""] + tilesets)
+
+    def cb(name, label, checked):
+        return ("<label><input type='checkbox' name='%s' value='1'%s> %s</label>" %
+                (name, " checked" if checked else "", label))
     filt = ("<form method='get'>Filter: <input type='text' name='q' value='%s'> "
             "Tileset: <select name='tileset'>%s</select> "
-            "<input type='submit' value='Apply filter'></form>" % (esc(q), opts))
+            "Type: %s %s %s "
+            "<input type='submit' value='Apply filter'></form>"
+            "<p class='note'>Type checkboxes narrow the list (all checked "
+            "boxes must match); an area can be more than one type "
+            "(e.g. an underground cave interior).</p>" %
+            (esc(q), opts,
+             cb("outside", "Outside", f_outside),
+             cb("interior", "Interior", f_interior),
+             cb("underground", "Underground", f_underground)))
     body = [filt,
             "<form method='post' action='/areas/select'>",
             "<table><tr><th><input type='checkbox' "
             "onclick=\"document.querySelectorAll('input[name=res]')"
             ".forEach(c=>c.checked=this.checked)\"></th>"
-            "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th>"
+            "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th><th>Type</th>"
             "<th>OnEnter</th><th>OnExit</th><th>OnHeartbeat</th><th>OnUserDefined</th></tr>"]
     for r in rows:
         body.append(
             "<tr><td><input type='checkbox' name='res' value='%s'></td>"
-            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td>%s</td><td>%s</td><td>%s</td></tr>" %
             tuple(esc(x) for x in (
                 r["res"], r["res"], r["name"], r["tag"], r["tileset"],
+                area_type_label(r["flags"]),
                 r["scripts"]["OnEnter"], r["scripts"]["OnExit"],
                 r["scripts"]["OnHeartbeat"], r["scripts"]["OnUserDefined"])))
     body.append("</table>")
     body.append("With selected: "
                 "<button name='action' value='scripts'>Edit scripts</button>"
                 "<button name='action' value='lighting'>Edit lighting/fog</button>"
+                "<button name='action' value='music'>Edit music</button>"
                 "<button name='action' value='tags'>Edit tags</button>"
                 "</form>")
     body.append("<p class='note'>%d areas shown.</p>" % len(rows))
@@ -385,6 +433,47 @@ def apply_lighting(root, form):
             invalidate(path)
             changed.append(res)
     return result_page("Lighting updated", changed, resrefs)
+
+
+def render_music_form(root, resrefs):
+    # Prefill from the first selected area so single-area edits show state.
+    d0 = load_cached(os.path.join(root, resrefs[0] + ".are"))
+    rows = "".join(
+        "<tr><td>%s</td>"
+        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
+        "<td>%s</td><td class='note'>%s</td></tr>" %
+        (f, f, esc(getv(d0, f, "")), hint)
+        for f, _t, hint in MUSIC_FIELDS)
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>"
+            "<form method='post' action='/areas/music/apply'>%s"
+            "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
+            "<th>Hint</th></tr>%s</table>"
+            "<p class='note'>Blank fields are left unchanged on every area. "
+            "Day/Night/Battle values are row indices into ambientmusic.2da "
+            "(look them up with the toolset's music picker or nwn-mcp's "
+            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<input type='submit' value='Apply to selected areas'></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), hidden_resrefs(resrefs),
+             esc(resrefs[0]), rows))
+    return page("Bulk edit area music", body)
+
+
+def apply_music(root, form):
+    resrefs, changed = form.get("res", []), []
+    for res in resrefs:
+        path = os.path.join(root, res + ".are")
+        d = gff_load(path)
+        touched = False
+        for f, gff_type, _hint in MUSIC_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if val:
+                setv(d, f, int(val), gff_type)
+                touched = True
+        if touched:
+            gff_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Music updated", changed, resrefs)
 
 
 def render_tags_form(root, resrefs):
@@ -638,6 +727,36 @@ def render_bics(bic_root, query):
     return page("Player characters (.bic)", "".join(body))
 
 
+# --- Module info --------------------------------------------------------------
+
+def render_module_form(d):
+    return (
+        "<form method='post' action='/module/apply'>"
+        "<fieldset><legend>Module Info</legend><table>"
+        "<tr><td>Module Name</td><td><input type='text' name='Mod_Name' "
+        "value='%s' size='60'></td></tr>"
+        "<tr><td>Description</td><td><textarea name='Mod_Description' "
+        "rows='10' cols='70'>%s</textarea></td></tr>"
+        "</table></fieldset>"
+        "<input type='submit' value='Save'></form>" %
+        (esc(loc_get(d, "Mod_Name")), esc(loc_get(d, "Mod_Description"))))
+
+
+def apply_module(root, form):
+    path = os.path.join(root, "module.ifo")
+    d = gff_load(path)
+    touched = False
+    for name in ("Mod_Name", "Mod_Description"):
+        val = form.get(name, [None])[0]
+        if val is not None and val != loc_get(d, name):
+            loc_set(d, name, val)
+            touched = True
+    if touched:
+        gff_save(path, d)
+        invalidate(path)
+    return touched
+
+
 # --- HTTP handler -----------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
@@ -688,7 +807,9 @@ class Handler(BaseHTTPRequestHandler):
                     "<li><a href='/creatures'>Creatures</a> - %d blueprints - "
                     "stats, feats, appearance</li>"
                     "<li><a href='/bics'>Characters</a> - player .bic files "
-                    "under %s</li></ul>"
+                    "under %s</li>"
+                    "<li><a href='/module'>Module Info</a> - title and "
+                    "description</li></ul>"
                     "<p class='note'>Data dir: %s. Every modified file gets a "
                     "one-time .bak sibling backup.</p>"
                     % (n_are, n_utc, esc(self.bic_root), esc(self.root))))
@@ -707,6 +828,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
+                          "music": render_music_form,
                           "tags": render_tags_form}.get(action, render_scripts_form)
                 self._send(render(self.root, resrefs))
             elif path == "/creatures":
@@ -727,6 +849,9 @@ class Handler(BaseHTTPRequestHandler):
                 ident = "<input type='hidden' name='path' value='%s'>" % esc(rel)
                 self._send(page("Character: " + rel,
                                 render_char_form(d, "/bic/apply", ident, True)))
+            elif path == "/module":
+                d = load_cached(os.path.join(self.root, "module.ifo"))
+                self._send(page("Module Info", render_module_form(d)))
             else:
                 self._send(page("Not found", "<p>No such page.</p>"), 404)
         except Exception as e:
@@ -746,12 +871,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
+                          "music": render_music_form,
                           "tags": render_tags_form}[action]
                 self._send(render(self.root, resrefs))
             elif path == "/areas/scripts/apply":
                 self._send(apply_scripts(self.root, form))
             elif path == "/areas/lighting/apply":
                 self._send(apply_lighting(self.root, form))
+            elif path == "/areas/music/apply":
+                self._send(apply_music(self.root, form))
             elif path == "/areas/tags/apply":
                 self._send(apply_tags(self.root, form))
             elif path == "/creature/apply":
@@ -774,6 +902,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(page("Saved", "<p class='ok'>%s saved.</p>"
                                 "<p><a href='/bic?path=%s'>Back</a></p>" %
                                 (esc(rel), urllib.parse.quote(rel))))
+            elif path == "/module/apply":
+                touched = apply_module(self.root, form)
+                msg = "Module info saved." if touched else "No changes."
+                self._send(page("Saved", "<p class='ok'>%s</p>"
+                                "<p><a href='/module'>Back</a></p>" % esc(msg)))
             else:
                 self._send(page("Not found", "<p>No such action.</p>"), 404)
         except Exception as e:

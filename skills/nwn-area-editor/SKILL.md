@@ -1,6 +1,6 @@
 ---
 name: nwn-area-editor
-description: Use this skill for selective or bulk edits to existing NWN:EE areas — changing area event scripts (OnEnter/OnExit/OnHeartbeat/OnUserDefined) across one or many areas, renaming area tags or resrefs, or adjusting lighting, fog, day/night, and weather settings. Trigger on "change the script on these areas", "set fog", "lighting", "rename this area's tag", "all areas in tileset X", or similar bulk-area requests. For building new areas or placing objects, use nwn-area-builder instead; for a browser UI, use nwn-web-editor.
+description: Use this skill for selective or bulk edits to existing NWN:EE areas — changing area event scripts (OnEnter/OnExit/OnHeartbeat/OnUserDefined) across one or many areas, renaming area tags or resrefs, adjusting lighting/fog/day-night/weather, setting day/night/battle music, or selecting areas by type (outside/interior/underground). Trigger on "change the script on these areas", "set fog", "lighting", "area music", "rename this area's tag", "all areas in tileset X", "all outdoor/interior/underground areas", or similar bulk-area requests. For building new areas or placing objects, use nwn-area-builder instead; for a browser UI, use nwn-web-editor.
 ---
 
 # NWN Area Editor (bulk/selective edits)
@@ -76,9 +76,48 @@ def hex_to_dword(s):                     # "#rrggbb" -> NWN dword
     return r | (g << 8) | (b << 16)
 ```
 
-Interior areas ignore Sun*/Moon* cycling unless flagged exterior (`Flags`
-bit 0x02 underground, etc.) — if a lighting change "does nothing" in-game,
-check `Flags` and `DayNightCycle` first.
+Interior areas ignore Sun*/Moon* cycling unless flagged exterior — see
+**Area type** below — if a lighting change "does nothing" in-game, check
+`Flags` and `DayNightCycle` first.
+
+## Music (all in .are)
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `MusicDay` | int | row in `ambientmusic.2da`; 0 = none |
+| `MusicNight` | int | row in `ambientmusic.2da`; 0 = none |
+| `MusicBattle` | int | row in `ambientmusic.2da`; 0 = none |
+| `MusicDelay` | byte | 0 = start day track immediately on entry, 1 = delay |
+
+These are 2DA row indices, **not resrefs** — look up the row number with the
+toolset's music picker or nwn-mcp's `resolve_2da`/`search_2da` on
+`ambientmusic`. `MusicBattle` only plays while the area's occupants are in
+combat; it layers over/replaces the day/night track depending on engine
+version.
+
+## Area type (`Flags` bitmask, in .are)
+
+Confirmed against nwn-mcp's own area-tools (`isInterior = Flags & 1`) and by
+sampling real area data — the three bits are independent, not mutually
+exclusive (e.g. an underground cave interior can have both bit 0 and bit 1
+set; an underdark natural cavern can have bits 1 and 2 both set):
+
+| Bit | Value | Meaning |
+|-----|-------|---------|
+| 0 | 1 | Interior — no natural daylight/weather |
+| 1 | 2 | Underground |
+| 2 | 4 | Natural — "outside": has weather/sky, non-interior tileset |
+
+```python
+FLAG_INTERIOR, FLAG_UNDERGROUND, FLAG_NATURAL = 1, 2, 4
+outdoor  = [r for r, d in areas.items() if d["Flags"]["value"] & FLAG_NATURAL]
+under    = [r for r, d in areas.items() if d["Flags"]["value"] & FLAG_UNDERGROUND]
+interior = [r for r, d in areas.items() if d["Flags"]["value"] & FLAG_INTERIOR]
+```
+
+`nwn-web-editor`'s `/areas` page exposes this as three AND'able filter
+checkboxes (Outside/Interior/Underground) alongside the name/tag/tileset
+filter.
 
 ## After editing
 
