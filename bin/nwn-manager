@@ -9,23 +9,30 @@ trap 'echo "[nwn-manager] ERROR at line $LINENO in ${FUNCNAME[0]:-main}: $BASH_C
 PROG=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-# Make the bundled nwn-tools binaries discoverable as a PATH fallback, so
-# nasher / nwn_gff / nwn_erf / nwnsc are found without a separate install.
-# Layout: <parent-of-repo>/nwn-tools/<platform>/{nasher,neverwinter,nwnsc,...}
-# (see the shared nwn-tools/ sibling described in the project docs).
-_tools_root="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/nwn-tools"
+# Make external tools discoverable as a PATH fallback, so nasher / nwn_gff /
+# nwn_erf / nwnsc are found even when the launching shell's PATH lacks them
+# (common when the console is started from a GUI or a minimal shell). We add:
+#   1) a bundled nwn-tools dir - $NWN_TOOLS_DIR, or the sibling of the repo -
+#      laid out as <root>/<platform>/{nasher,neverwinter,nwnsc,...}
+#   2) the usual Nim install bin dirs (~/.nimble/bin, ~/.local/bin)
 case "$(uname -s 2>/dev/null)" in
   Darwin) _plat=macos_arm64 ;;
   Linux)  _plat=linux ;;
   MINGW*|MSYS*|CYGWIN*) _plat=win ;;
   *)      _plat="" ;;
 esac
+_tools_root="${NWN_TOOLS_DIR:-$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/nwn-tools}"
 if [[ -n ${_plat:-} && -d "$_tools_root/$_plat" ]]; then
   for _d in nasher neverwinter nwnsc sqlite; do
     [[ -d "$_tools_root/$_plat/$_d" ]] && PATH="$PATH:$_tools_root/$_plat/$_d"
   done
-  export PATH
 fi
+# $NWN_TOOLS_DIR may also point straight at a flat directory of binaries.
+[[ -n ${NWN_TOOLS_DIR:-} && -d "$NWN_TOOLS_DIR" ]] && PATH="$PATH:$NWN_TOOLS_DIR"
+for _d in "$HOME/.nimble/bin" "$HOME/.local/bin"; do
+  [[ -d "$_d" ]] && PATH="$PATH:$_d"
+done
+export PATH
 unset _tools_root _plat _d 2>/dev/null || true
 
 usage() {
