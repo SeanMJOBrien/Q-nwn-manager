@@ -101,21 +101,19 @@ EOF
 }
 
 # Verify required external CLIs are available; print install hints if not.
+# Portable to bash 3.2 (macOS system bash) - no associative arrays.
 preflight() {
-  # NB: declare -A first, then assign keys. The compound form
-  # `declare -A HINT=([nasher]=...)` trips "unbound variable" under `set -u`
-  # on some bash builds (the subscript is evaluated before the array is
-  # marked associative).
-  local -A HINT
-  HINT[nasher]="nimble install nasher"
-  HINT[nwn_gff]="nimble install neverwinter"
-  HINT[nwn_script_comp]="nimble install neverwinter"
-  HINT[python3]="install Python 3 (system package)"
-  local missing=0
+  local missing=0 bin hint
   for bin in "$@"; do
     if ! command -v "$bin" >/dev/null 2>&1; then
+      case "$bin" in
+        nasher)                   hint="nimble install nasher" ;;
+        nwn_gff|nwn_script_comp)  hint="nimble install neverwinter" ;;
+        python3)                  hint="install Python 3 (system package)" ;;
+        *)                        hint="" ;;
+      esac
       echo "error: required tool '$bin' not on PATH" >&2
-      [[ -n "${HINT[$bin]:-}" ]] && echo "       install with: ${HINT[$bin]}" >&2
+      [[ -n "$hint" ]] && echo "       install with: $hint" >&2
       missing=1
     fi
   done
