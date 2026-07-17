@@ -9,6 +9,25 @@ trap 'echo "[nwn-manager] ERROR at line $LINENO in ${FUNCNAME[0]:-main}: $BASH_C
 PROG=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+# Make the bundled nwn-tools binaries discoverable as a PATH fallback, so
+# nasher / nwn_gff / nwn_erf / nwnsc are found without a separate install.
+# Layout: <parent-of-repo>/nwn-tools/<platform>/{nasher,neverwinter,nwnsc,...}
+# (see the shared nwn-tools/ sibling described in the project docs).
+_tools_root="$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/nwn-tools"
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _plat=macos_arm64 ;;
+  Linux)  _plat=linux ;;
+  MINGW*|MSYS*|CYGWIN*) _plat=win ;;
+  *)      _plat="" ;;
+esac
+if [[ -n ${_plat:-} && -d "$_tools_root/$_plat" ]]; then
+  for _d in nasher neverwinter nwnsc sqlite; do
+    [[ -d "$_tools_root/$_plat/$_d" ]] && PATH="$PATH:$_tools_root/$_plat/$_d"
+  done
+  export PATH
+fi
+unset _tools_root _plat _d 2>/dev/null || true
+
 usage() {
   cat <<EOF
 $PROG — multi-module manager for NWN1 .mod files.
@@ -871,11 +890,12 @@ cmd_serve() {
 main() {
   case "${1:-}" in
     init)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      # Unpacking only needs nasher + nwn_gff (no script compilation).
+      shift; preflight nasher nwn_gff
       cmd_init "$@"
       ;;
     unpack)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      shift; preflight nasher nwn_gff
       cmd_unpack "$@"
       ;;
     repack)
