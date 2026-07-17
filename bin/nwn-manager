@@ -125,9 +125,11 @@ Per-project layout (created by 'init'):
 
 Prerequisites (must be on PATH):
   nasher              — nimble install nasher
-  nwn_gff             — nimble install neverwinter
-  nwn_script_comp     — nimble install neverwinter
-  python3             — for 'wiki' subcommand
+  nwn_gff, nwn_erf    — nimble install neverwinter
+  nwnsc               — bundled in nwn-tools/<platform>/nwnsc/, or
+                         squattingmonk/nwnsc release (used by 'repack' to
+                         compile scripts on all platforms)
+  python3             — for 'wiki' and 'console' subcommands
 EOF
 }
 
@@ -139,7 +141,8 @@ preflight() {
     if ! command -v "$bin" >/dev/null 2>&1; then
       case "$bin" in
         nasher)                   hint="nimble install nasher" ;;
-        nwn_gff|nwn_script_comp)  hint="nimble install neverwinter" ;;
+        nwn_gff|nwn_erf|nwn_script_comp) hint="nimble install neverwinter" ;;
+        nwnsc)                    hint="bundled in nwn-tools/<platform>/nwnsc/, or squattingmonk/nwnsc release" ;;
         python3)                  hint="install Python 3 (system package)" ;;
         *)                        hint="" ;;
       esac
@@ -241,11 +244,15 @@ detect_nwn_userdir() {
   done
 }
 
-# Build the comma-separated list of hak file paths the module declares in
-# its Mod_HakList. Each hak is symlinked into /tmp under a no-space name
-# so it survives nasher's whitespace-splitting of --nssFlags. Echoes the
-# comma-separated list, or empty if module.ifo.json or userdir is missing.
-build_compiler_erfs() {
+# Extract each hak the module declares (via Mod_HakList) into its own
+# scratch directory of plain files, for use as nwnsc's -i include-path list
+# (nwnsc, unlike the old nwn_script_comp --erfs, has no ability to load
+# .hak/.erf archives directly — only plain filesystem directories).
+# Echoes one scratch-dir path per line; empty if module.ifo.json or userdir
+# is missing. NOTE: the caller is responsible for registering the returned
+# paths for cleanup — this function may be invoked via command substitution
+# (a subshell), whose traps do not propagate back to the caller's shell.
+extract_hak_includes() {
   [[ -f unpacked/module.ifo.json ]] || return 0
   local userdir
   userdir=$(detect_nwn_userdir) || return 0
@@ -262,8 +269,7 @@ try:
 except Exception:
     pass') || return 0
 
-  local out=""
-  local h hak link
+  local h hak dir
   while IFS= read -r h; do
     [[ -z $h ]] && continue
     hak="$userdir/hak/${h}.hak"
@@ -271,13 +277,14 @@ except Exception:
       echo "[$PROG] warn: declared hak $h.hak not found at $hak — compiler may miss its includes" >&2
       continue
     fi
-    link="/tmp/nwnmgr_hak_${h}.hak"
-    ln -sfn "$hak" "$link"
-    out+="${link},"
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/nwnmgr_hakx_${h}_XXXXXX")
+    if ( cd "$dir" && nwn_erf -x -f "$hak" ) >/dev/null 2>&1; then
+      printf '%s\n' "$dir"
+    else
+      echo "[$PROG] warn: failed to extract $h.hak — compiler may miss its includes" >&2
+      rm -rf "$dir"
+    fi
   done <<< "$haks"
-
-  out="${out%,}"
-  printf '%s\n' "$out"
 }
 
 # Extract the base dialog.tlk and the custom TLK (named in module.ifo's
@@ -558,27 +565,97 @@ cmd_repack() {
     fi
   fi
 
-  # Build --erfs flag pointing at the haks the module declares so the
-  # script compiler can resolve includes (e.g. zep_inc_main.nss,
-  # ITEM_PROPERTY_BOOMERANG, gplotAppraiseOpenStore from CEP / engine
-  # base). Without this, nasher only sees nss in unpacked/ and most
-  # CEP-dependent scripts fail to compile.
-  local erfs
-  erfs=$(build_compiler_erfs)
-  local pack_args=(--yes)
-  if [[ -n $erfs ]]; then
-    # -y: continue past per-script errors so we see the full picture instead
-    # of stopping at the first one and reporting "0 of N compiled".
-    pack_args+=("--nssFlags:-y --erfs=$erfs")
-    echo "[$PROG] compiler --erfs: $erfs"
+  # All cleanup (hak-extraction scratch dirs below, plus the build-stamp
+  # file further down) is accumulated into this single EXIT trap. A second
+  # `trap ... EXIT` call OVERWRITES rather than adds to the first, so every
+  # site that needs cleanup must append to $_repack_cleanup_paths and
+  # re-register the trap with the full accumulated string — never call
+  # `trap ... EXIT` with a partial/one-off value.
+  _repack_cleanup_paths=""
+
+  # Resolve the bundled base-game scripts dir (nwscript.nss and the base/SoU/
+  # HotU includes). The old nwn_script_comp could pull these straight out of
+  # a live NWN install's .bif/.key files via --root; nwnsc has no equivalent
+  # that works on server-only boxes with no game client installed, so a
+  # pre-extracted copy is vendored at nwn-tools/base-scripts/ instead.
+  local base_scripts=""
+  if [[ -n ${NWN_BASE_SCRIPTS_DIR:-} && -d $NWN_BASE_SCRIPTS_DIR ]]; then
+    base_scripts=$NWN_BASE_SCRIPTS_DIR
+  elif [[ -n ${NWN_TOOLS_DIR:-} && -d "$NWN_TOOLS_DIR/base-scripts" ]]; then
+    base_scripts="$NWN_TOOLS_DIR/base-scripts"
+  elif [[ -d "$SCRIPT_DIR/../nwn-tools/base-scripts" ]]; then
+    base_scripts="$SCRIPT_DIR/../nwn-tools/base-scripts"
+  elif [[ -d "$SCRIPT_DIR/../../nwn-tools/base-scripts" ]]; then
+    base_scripts="$SCRIPT_DIR/../../nwn-tools/base-scripts"
+  fi
+  if [[ -z $base_scripts ]]; then
+    echo "[$PROG] warn: no base-scripts dir found (checked \$NWN_BASE_SCRIPTS_DIR, nwn-tools/base-scripts) — base-game includes like nwscript.nss may fail to resolve" >&2
   fi
 
-  # Wrap nwn_script_comp so the --root/--userdirectory paths nasher
-  # auto-detects (which contain "Neverwinter Nights" with a space) get
-  # symlinked to no-space /tmp paths before invocation.
-  local wrapper="$SCRIPT_DIR/nwn_script_comp_wrapper"
-  if [[ -x $wrapper ]]; then
-    pack_args+=("--nssCompiler:$wrapper")
+  # Extract the haks the module declares so the compiler can resolve
+  # includes (e.g. zep_inc_main.nss, ITEM_PROPERTY_BOOMERANG,
+  # gplotAppraiseOpenStore from CEP / engine base). Without this, nwnsc only
+  # sees nss in unpacked/ and most CEP-dependent scripts fail to compile.
+  # Read via process substitution (not a pipe) so the loop runs in THIS
+  # shell, not a subshell — needed for both array/variable accumulation
+  # below to actually persist past the loop.
+  local nss_include_dirs=()
+  [[ -n $base_scripts ]] && nss_include_dirs+=("$base_scripts")
+  local hak_dir
+  while IFS= read -r hak_dir; do
+    [[ -z $hak_dir ]] && continue
+    nss_include_dirs+=("$hak_dir")
+    _repack_cleanup_paths+=" $(printf '%q' "$hak_dir")"
+  done < <(extract_hak_includes)
+  [[ -n $_repack_cleanup_paths ]] && trap "rm -rf${_repack_cleanup_paths}" EXIT
+
+  # nwnsc resolves #include "X" by looking for a file literally named X.nss —
+  # unlike nwn_script_comp's resman, it is case-sensitive. Base-game/CEP
+  # scripts (and some project scripts) were written assuming a
+  # case-insensitive filesystem, so on Linux/most macOS setups those includes
+  # fail with NSC1085 "Unable to open the include file" unless a directory of
+  # case-corrected symlinks is generated and added to -i. See
+  # nwn-tools/gen_include_shims.sh for details.
+  local shim_script=""
+  if [[ -n ${NWN_TOOLS_DIR:-} && -x "$NWN_TOOLS_DIR/gen_include_shims.sh" ]]; then
+    shim_script="$NWN_TOOLS_DIR/gen_include_shims.sh"
+  elif [[ -x "$SCRIPT_DIR/../nwn-tools/gen_include_shims.sh" ]]; then
+    shim_script="$SCRIPT_DIR/../nwn-tools/gen_include_shims.sh"
+  elif [[ -x "$SCRIPT_DIR/../../nwn-tools/gen_include_shims.sh" ]]; then
+    shim_script="$SCRIPT_DIR/../../nwn-tools/gen_include_shims.sh"
+  fi
+  if [[ -n $shim_script && -d "$root/unpacked" ]]; then
+    local shim_dir
+    shim_dir=$(mktemp -d "${TMPDIR:-/tmp}/nwnmgr_shims_XXXXXX")
+    _repack_cleanup_paths+=" $(printf '%q' "$shim_dir")"
+    trap "rm -rf${_repack_cleanup_paths}" EXIT
+    if "$shim_script" "$shim_dir" "$root/unpacked" "${nss_include_dirs[@]:-}" >&2; then
+      nss_include_dirs=("$shim_dir" "${nss_include_dirs[@]:-}")
+    else
+      echo "[$PROG] warn: gen_include_shims.sh failed — case-mismatched #includes may not resolve" >&2
+    fi
+  else
+    echo "[$PROG] warn: gen_include_shims.sh not found — case-mismatched #includes (e.g. NW_I0_SPELLS vs nw_i0_spells.nss) may fail to resolve" >&2
+  fi
+
+  local pack_args=(--yes)
+  local nwnsc_bin
+  nwnsc_bin=$(command -v nwnsc || true)
+  if [[ -n $nwnsc_bin ]]; then
+    pack_args+=("--nssCompiler:$nwnsc_bin")
+    if [[ ${#nss_include_dirs[@]} -gt 0 ]]; then
+      local nss_include
+      nss_include=$(IFS=';'; echo "${nss_include_dirs[*]}")
+      # -lowqey: load base resources, optimize, non-BioWare extensions,
+      # quiet, continue-on-error — the exact flag string already proven in
+      # production across this user's other nasher/nwnsc projects.
+      pack_args+=("--nssFlags:-lowqey -i $nss_include")
+      echo "[$PROG] compiler: $nwnsc_bin -i $nss_include"
+    else
+      echo "[$PROG] compiler: $nwnsc_bin (no -i include dirs resolved)"
+    fi
+  else
+    echo "[$PROG] warn: nwnsc not found — nasher will fall back to its own default compiler resolution" >&2
   fi
 
   # Build stamp (module-agnostic; opt-in at runtime): generate a tiny script that
@@ -627,9 +704,13 @@ cmd_repack() {
 // Opt in from any module event: ExecuteScript("nwnmgr_bstamp", oPC);
 void main() { SendMessageToPC(OBJECT_SELF, "Module last edited: $stamp_esc"); }
 EOF
-    # Expand the path into the trap NOW (set-time): $stamp_nss is function-local and
-    # is out of scope by the time an EXIT trap would run.
-    trap "rm -f $(printf '%q' "$stamp_nss")" EXIT
+    # Expand the path into the trap NOW (set-time): $stamp_nss is function-local
+    # and is out of scope by the time an EXIT trap would run. Merge into the
+    # shared cleanup accumulator (see note above) rather than a standalone
+    # `trap ... EXIT` call, which would silently drop the hak-scratch-dir
+    # cleanup registered earlier.
+    _repack_cleanup_paths+=" $(printf '%q' "$stamp_nss")"
+    trap "rm -rf${_repack_cleanup_paths}" EXIT
     echo "[$PROG] build stamp: $stamp"
   fi
 
@@ -913,7 +994,7 @@ main() {
       cmd_unpack "$@"
       ;;
     repack)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      shift; preflight nasher nwn_gff nwn_erf nwnsc
       cmd_repack "$@"
       ;;
     wiki)

@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# nwn_script_comp_wrapper — invoked by nasher in place of nwn_script_comp.
+# nwn_script_comp_wrapper — NO LONGER auto-invoked by `nwn-manager repack`,
+# which now uses nwnsc on all platforms (nwn_script_comp is Linux-only
+# upstream and CLI-incompatible with nwnsc — see cmd_repack in bin/nwn-manager
+# and extract_hak_includes). Kept for manual/legacy use only: if you want
+# BioWare-compatible, resource-manager-based compilation via nwn_script_comp
+# directly (e.g. `--nssCompiler:bin/nwn_script_comp_wrapper` passed to your
+# own `nasher pack` invocation), this still works standalone.
+#
 # nasher passes --root and --userdirectory as separate space-bearing args
 # (e.g. "Neverwinter Nights"). Argv is intact, but nasher's underlying
 # execProcess on Linux re-shells the command, which splits paths on

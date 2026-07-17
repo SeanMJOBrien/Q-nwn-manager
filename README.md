@@ -59,21 +59,41 @@ A Nim toolchain plus two Nim packages must be on `PATH`:
 
 - `nim`, `nimble`
 - `nasher`
-- `nwn_gff`, `nwn_script_comp` (from the `neverwinter` package)
+- `nwn_gff`, `nwn_erf` (from the `neverwinter` package) and `nwnsc` (a
+  separate, standalone script compiler)
 - `python3` (for `nwn-manager wiki` and `nwn-manager console`)
 
-> **Bundled tools — usually no install needed.** This repo ships the core
-> binaries in [`nwn-tools/`](nwn-tools/) for `linux`, `macos_arm64`, and `win`
-> (`nasher`, `nwn_gff`, `nwn_erf`, plus `nwn_script_comp`/`nwnsc`), and
-> `nwn-manager` adds the right one to `PATH` automatically. So a fresh clone can
-> ingest/build without any `nimble install`. Resolution order:
-> `$NWN_TOOLS_DIR` → the in-repo `nwn-tools/` → a shared `nwn-tools/` sibling of
-> the repo → `~/.nimble/bin`. Ingesting (`init`/`unpack`) needs only
-> `nasher` + `nwn_gff`; the compiler is required only for **building**
-> (`repack`) — on macOS/Windows that's `nwnsc` (the bundle has no
-> `nwn_script_comp` there). The bundled tools are a curated subset; the full
-> tool suite (extra `neverwinter` utilities) still lives in the shared
-> `nwn-tools/` sibling.
+> **Bundled tools — no install needed.** This repo ships the **full**
+> `nwn-tools/` directory (all three platforms: `linux`, `macos_arm64`, `win`)
+> and `nwn-manager` adds the right platform's binaries to `PATH`
+> automatically, so a fresh clone can ingest/build/wiki with no `nimble
+> install`. Resolution order: `$NWN_TOOLS_DIR` → the in-repo `nwn-tools/` → a
+> shared `nwn-tools/` sibling of the repo → `~/.nimble/bin`.
+>
+> **Building (`repack`) always uses the bundled `nwnsc`, on all three
+> platforms** — `nwn-manager` no longer uses `nwn_script_comp` at all (it's a
+> niv/neverwinter.nim tool that upstream has never shipped for macOS or
+> Windows, and its CLI isn't compatible with `nwnsc` anyway). `nwn_script_comp`
+> stays bundled on Linux only, for manual/legacy use via
+> `bin/nwn_script_comp_wrapper` — nothing in `nwn-manager` invokes it
+> automatically anymore. Ingesting (`init`/`unpack`) only needs `nasher` +
+> `nwn_gff`.
+>
+> **`nwn-tools/base-scripts/`** (~20MB, vendored alongside the per-platform
+> dirs) is a pre-extracted copy of the base game's `nwscript.nss` and all
+> base/SoU/HotU includes. `nwnsc` (unlike the old `nwn_script_comp`) can't pull
+> these from a live NWN install on a server box with no game client present,
+> so `repack` passes this directory via `-i` instead. Override with
+> `$NWN_BASE_SCRIPTS_DIR` if you need a patched/updated set; regenerate it (on
+> Linux, the only platform with `nwn_resman_extract` bundled) with
+> `nwn_resman_extract --all -p .nss --root <NWN_INSTALL> --userdirectory
+> <NWN_USERDIR> -d nwn-tools/base-scripts` against a real, fully-installed
+> client.
+>
+> **`nasher` is pinned at the currently-vendored 0.19.0/0.20.0**, not the
+> upstream 1.1.2 release — nasher's own vendoring notes flag the 1.x line as a
+> breaking CLI/config change; bumping it needs a dedicated test pass across
+> every project depending on the flags `nwn-manager` passes to `nasher pack`.
 >
 > On macOS, binaries from a `git clone` are **not** Gatekeeper-quarantined, so
 > they run from the terminal without prompts.
