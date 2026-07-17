@@ -304,22 +304,28 @@ Long operations (build ~minutes, wiki ~30s, ingest) run as background jobs with
 a live-progress page (`/jobs/<id>`). Binds `127.0.0.1` only; put it behind a
 reverse proxy (with `--url-prefix`) if you need to expose it.
 
-#### Start page (`/start`) — a simpler ingest entry point
+#### `start.html` — a simpler ingest entry point
 
-Alongside the full dashboard at `/`, the console serves a standalone
-ingestion page at **`/start`** (printed on launch). It's driven by an editable
-**`start.html`** at the repo root — hand it to someone who only needs to
-*ingest a module*, without the rest of the console. Two ways to ingest:
+Alongside the full dashboard, there's a standalone ingestion page,
+**`start.html`** at the repo root. Hand it to someone who only needs to
+*ingest a module*, without the rest of the console. It's a **self-contained
+static page** — open the file directly in a browser, or reach the same page
+served at **`/start`** (printed on launch). Two ways to ingest:
 
+- **Upload** a `.mod`/`.erf` via the browser file picker.
 - **Drop a `.mod`/`.erf` into the repo root** (the drop folder; override with
-  `--landing-dir`) — it's listed on `/start` with an **Ingest** button.
-- **Upload** via the browser file picker (same as the dashboard).
+  `--landing-dir`) — the page lists it with an **Ingest** button.
 
-`start.html` is a normal HTML file you can restyle/reword freely; the console
-only substitutes its `{{ROOT_MODS}}`, `{{UPLOAD_FORM}}`, `{{CSS}}`,
-`{{PREREQ}}` and `{{CONSOLE}}` tokens (which carry proxy-aware URLs). If the
-file is missing, a built-in fallback page is served. The dashboard and all
-other console routes are unchanged.
+Both need the console running (default `http://127.0.0.1:8341`). The upload
+form posts to the console, and the drop-folder list is fetched from the
+console's `GET /api/root-mods` (served CORS-open so the page works even from
+`file://`). When you open the file directly and your console is on a
+non-default address, edit the one `CONSOLE_URL` line near the bottom of
+`start.html`; when the page is served at `/start` that value is ignored and
+same-origin URLs are used, so ports and `--url-prefix` just work. `start.html`
+is a normal HTML file you can restyle/reword freely; if it's missing, a
+built-in fallback is served. The dashboard and all other console routes are
+unchanged.
 
 > The older `nwn-manager edit-areas` (single-project areas-only editor,
 > `nwn-area-editor --dir`) still works unchanged for scripted/one-off use and

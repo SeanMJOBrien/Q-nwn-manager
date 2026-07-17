@@ -943,74 +943,74 @@ def render_dashboard():
 # --- Start page (ingestion) -------------------------------------------------
 
 def root_mod_files():
-    """Sorted .mod/.erf files the user has dropped into LANDING_DIR."""
+    """Sorted .mod/.erf basenames the user has dropped into LANDING_DIR."""
     if not LANDING_DIR or not os.path.isdir(LANDING_DIR):
         return []
-    out = []
-    for f in sorted(os.listdir(LANDING_DIR)):
-        if f.lower().endswith((".mod", ".erf")) \
-                and os.path.isfile(os.path.join(LANDING_DIR, f)):
-            out.append(os.path.join(LANDING_DIR, f))
-    return out
+    return [f for f in sorted(os.listdir(LANDING_DIR))
+            if f.lower().endswith((".mod", ".erf"))
+            and os.path.isfile(os.path.join(LANDING_DIR, f))]
 
 
-def render_root_mods():
-    """{{ROOT_MODS}} fragment: one ingest form per detected root module."""
-    mods = root_mod_files()
-    if not mods:
-        return ("<p class='note'>No modules found in the drop folder "
-                "(<code>%s</code>). Copy a <code>.mod</code> there, or use the "
-                "upload form.</p>" % esc(LANDING_DIR or "?"))
-    rows = []
-    for path in mods:
-        base = os.path.basename(path)
-        default_slug = sanitize_slug(os.path.splitext(base)[0])
-        rows.append(
-            "<form method='post' action='%s' class='mod-row'>"
-            "<input type='hidden' name='file' value='%s'>"
-            "<b>%s</b> - slug "
-            "<input type='text' name='slug' value='%s'> "
-            "<button type='submit'>Ingest</button></form>" %
-            (gurl("/projects/ingest-root"), esc(base), esc(base),
-             esc(default_slug)))
-    return "".join(rows)
-
-
-# Built-in fallback used only when start.html is missing from LANDING_DIR.
-# The committed start.html file is the canonical, user-editable version.
-DEFAULT_START_HTML = """<!doctype html>
-<html><head><meta charset='utf-8'><title>Ingest a module</title>
-<style>{{CSS}}</style></head><body>
+# Built-in fallback, used only if start.html is missing from LANDING_DIR.
+# The committed start.html is the canonical, user-editable page; both are
+# fully self-contained (a real upload form + JS that lists the drop folder),
+# so they work whether opened directly as a file or served at /start.
+FALLBACK_START_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingest a module</title>
+<style>body{font-family:system-ui,sans-serif;margin:1.5em;max-width:60em;
+background:#1e1f24;color:#d8d9de}a{color:#7ab3ff}.card{border:1px solid #444;
+background:#25262c;border-radius:6px;padding:.8em 1.1em;margin:1em 0}
+input[type=text],input[type=file]{background:#2a2b31;color:#d8d9de;
+border:1px solid #555;padding:.3em}button{background:#39507a;color:#fff;border:0;
+padding:.5em 1.1em;cursor:pointer;border-radius:4px;font-size:1em}
+.note{color:#9a9;font-style:italic}</style></head><body>
 <h1>Ingest a module</h1>
-<p><a href="{{CONSOLE}}">&#8594; Open the full console (all projects)</a></p>
-<div class="card"><h2>Modules in the drop folder</h2>{{ROOT_MODS}}</div>
-{{UPLOAD_FORM}}
-{{PREREQ}}
-</body></html>
-"""
+<div class="card"><h2>Upload a module</h2>
+<form data-console="/projects/new" method="post" enctype="multipart/form-data">
+<p>Module (.mod/.erf): <input type="file" name="module" accept=".mod,.erf" required></p>
+<p>Slug: <input type="text" name="slug" placeholder="(defaults to file name)"></p>
+<button type="submit">Upload &amp; ingest</button></form></div>
+<div class="card"><h2>Modules in the drop folder</h2>
+<div id="rootmods"><p class="note">Loading...</p></div></div>
+<p class="note">(built-in fallback - restore start.html to customise)</p>
+<script>
+var CONSOLE_URL="http://127.0.0.1:8341";
+var base=location.protocol.indexOf("http")===0?
+  location.pathname.replace(/\\/start\\/?$/,""):CONSOLE_URL;
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c];});}
+document.querySelectorAll("form[data-console]").forEach(function(f){
+  f.setAttribute("action",base+f.getAttribute("data-console"));});
+fetch(base+"/api/root-mods").then(function(r){return r.json();}).then(function(d){
+  var el=document.getElementById("rootmods");
+  if(!d.mods||!d.mods.length){el.innerHTML="<p class='note'>No modules in the drop folder.</p>";return;}
+  el.innerHTML=d.mods.map(function(m){return "<form method='post' action='"+esc(base)
+    +"/projects/ingest-root'><input type='hidden' name='file' value='"+esc(m)
+    +"'><b>"+esc(m)+"</b> <input type='text' name='slug' value='"
+    +esc(m.replace(/\\.[^.]*$/,""))+"'> <button type='submit'>Ingest</button></form>";}).join("");
+}).catch(function(){document.getElementById("rootmods").innerHTML=
+  "<p class='note'>Couldn't reach the console at "+esc(base||CONSOLE_URL)+".</p>";});
+</script></body></html>"""
 
 
 def render_start():
-    """Serve the editable start.html (token-substituted); fallback if absent.
+    """Serve the standalone start.html verbatim (fallback if the file is gone).
 
-    start.html is a full HTML document; the console only substitutes the
-    {{TOKEN}} slots, so editing everything else in the file is safe. The
-    dynamic slots carry proxy-aware URLs, so the page works behind --url-prefix.
+    start.html is fully self-contained - it works opened directly as a file
+    (its upload form posts to the console; JS lists the drop folder via
+    /api/root-mods) and identically when served here at /start. Nothing is
+    templated, so what you edit in the file is exactly what is served.
     """
-    tmpl = DEFAULT_START_HTML
     if LANDING_DIR:
         path = os.path.join(LANDING_DIR, "start.html")
         if os.path.isfile(path):
             try:
                 with open(path, encoding="utf-8") as fh:
-                    tmpl = fh.read()
+                    return fh.read()
             except OSError:
                 pass
-    return (tmpl.replace("{{CSS}}", CSS)
-                .replace("{{ROOT_MODS}}", render_root_mods())
-                .replace("{{UPLOAD_FORM}}", upload_form_html())
-                .replace("{{PREREQ}}", PREREQ_NOTE)
-                .replace("{{CONSOLE}}", gurl("/")))
+    return FALLBACK_START_HTML
 
 
 def render_project_home(proj):
@@ -1118,6 +1118,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_json(self, obj, code=200, cors=False):
+        headers = {"Access-Control-Allow-Origin": "*"} if cors else None
+        self._send_bytes(json.dumps(obj).encode(), "application/json",
+                         code=code, extra_headers=headers)
+
     def _redirect(self, url):
         self.send_response(303)
         self.send_header("Location", url)
@@ -1156,6 +1161,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(render_dashboard())
             elif path == "/start":
                 self._send(render_start())
+            elif path == "/api/root-mods":
+                # Consumed by start.html's JS; CORS-open so the page works even
+                # when opened directly as a file:// document.
+                self._send_json({"landing_dir": LANDING_DIR or "",
+                                 "mods": root_mod_files()}, cors=True)
             elif path.startswith("/jobs/"):
                 job = get_job(path[len("/jobs/"):])
                 if not job:
@@ -1378,8 +1388,7 @@ class Handler(BaseHTTPRequestHandler):
         """Ingest a .mod/.erf the user dropped into LANDING_DIR (the repo root)."""
         chosen = safe_basename(form.get("file", [""])[0])
         want = form.get("slug", [""])[0].strip()
-        detected = {os.path.basename(p) for p in root_mod_files()}
-        if chosen not in detected:
+        if chosen not in set(root_mod_files()):
             self._send(page("Ingest error",
                             "<p class='err'>No such module in the drop folder.</p>"
                             "<p><a href='%s'>Back to start</a></p>" % gurl("/start")),
