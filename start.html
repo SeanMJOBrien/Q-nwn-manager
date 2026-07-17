@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingest a module - NWN console</title>
+<!-- {{CSS}} is filled in with the console stylesheet by nwn-area-editor.
+     Everything else in this file is yours to edit; only the {{TOKENS}} are
+     substituted at serve time, so changing the layout/text here is safe. -->
+<style>{{CSS}}</style>
+<style>
+.mod-row{margin:.3em 0}
+.mod-row input[type=text]{width:14em}
+.hero{max-width:60em}
+</style>
+</head>
+<body class="hero">
+
+<h1>Ingest a module</h1>
+<p class="note">
+  Create a new project from a Neverwinter Nights <code>.mod</code> (or
+  <code>.erf</code>). Ingesting unpacks the module into its own project you can
+  then edit, wiki, build, and download from the console.
+</p>
+<p><a href="{{CONSOLE}}">&#8594; Open the full console (manage all projects)</a></p>
+
+<div class="card">
+  <h2>Modules in the drop folder</h2>
+  <p class="note">Copy a <code>.mod</code> into the drop folder, then pick it
+  here. Adjust the project name (slug) if you like.</p>
+  {{ROOT_MODS}}
+</div>
+
+{{UPLOAD_FORM}}
+
+{{PREREQ}}
+
+</body>
+</html>

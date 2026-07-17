@@ -304,6 +304,23 @@ Long operations (build ~minutes, wiki ~30s, ingest) run as background jobs with
 a live-progress page (`/jobs/<id>`). Binds `127.0.0.1` only; put it behind a
 reverse proxy (with `--url-prefix`) if you need to expose it.
 
+#### Start page (`/start`) — a simpler ingest entry point
+
+Alongside the full dashboard at `/`, the console serves a standalone
+ingestion page at **`/start`** (printed on launch). It's driven by an editable
+**`start.html`** at the repo root — hand it to someone who only needs to
+*ingest a module*, without the rest of the console. Two ways to ingest:
+
+- **Drop a `.mod`/`.erf` into the repo root** (the drop folder; override with
+  `--landing-dir`) — it's listed on `/start` with an **Ingest** button.
+- **Upload** via the browser file picker (same as the dashboard).
+
+`start.html` is a normal HTML file you can restyle/reword freely; the console
+only substitutes its `{{ROOT_MODS}}`, `{{UPLOAD_FORM}}`, `{{CSS}}`,
+`{{PREREQ}}` and `{{CONSOLE}}` tokens (which carry proxy-aware URLs). If the
+file is missing, a built-in fallback page is served. The dashboard and all
+other console routes are unchanged.
+
 > The older `nwn-manager edit-areas` (single-project areas-only editor,
 > `nwn-area-editor --dir`) still works unchanged for scripted/one-off use and
 > reverse-proxied per-project deployments. For editing player `.bic` character

@@ -56,6 +56,7 @@ PROJECTS_DIR = None    # multi-project root (None in legacy single-dir mode)
 SINGLE_MODE = False     # True when launched with --dir instead of --projects-dir
 SINGLE_PROJECT = None   # the implicit Project in single-dir mode
 NWN_MANAGER = None      # path to the nwn-manager wrapper (for init/unpack/wiki/repack)
+LANDING_DIR = None      # where start.html lives and dropped .mod files are scanned
 
 # Per-request context (ThreadingHTTPServer gives one thread per request).
 _req = threading.local()
@@ -898,6 +899,28 @@ def apply_module(root, form):
 
 # --- Dashboard / project home / jobs pages ----------------------------------
 
+def upload_form_html():
+    """The browser-upload ingest form (shared by dashboard and start page)."""
+    return (
+        "<div class='card'><h2>New project from a module</h2>"
+        "<form method='post' action='%s' enctype='multipart/form-data'>"
+        "<p>Project name (slug): <input type='text' name='slug' "
+        "placeholder='(defaults to the .mod filename)'></p>"
+        "<p>Module file (.mod): <input type='file' name='module' "
+        "accept='.mod,.erf' required></p>"
+        "<p>Extra files (optional, dropped into unpacked/): "
+        "<input type='file' name='extra' multiple></p>"
+        "<input type='submit' value='Upload &amp; ingest'></form>"
+        "<p class='note'>Ingest runs <code>nwn-manager init</code> and unpacks "
+        "the module into its own project subdirectory.</p></div>"
+        % gurl("/projects/new"))
+
+
+PREREQ_NOTE = ("<p class='note'>Requires <code>nasher</code>, <code>nwn_gff</code>, "
+               "<code>nwn_script_comp</code> and <code>python3</code> on PATH "
+               "(build/wiki jobs fail loudly otherwise).</p>")
+
+
 def render_dashboard():
     projs = list_projects()
     cards = []
@@ -912,24 +935,82 @@ def render_dashboard():
             (gurl("/p/%s/" % p.slug), esc(p.slug), "".join(pills)))
     listing = ("<div class='grid'>%s</div>" % "".join(cards) if cards else
                "<p class='note'>No projects yet. Upload a .mod below to create one.</p>")
-    upload = (
-        "<div class='card'><h2>New project from a module</h2>"
-        "<form method='post' action='%s' enctype='multipart/form-data'>"
-        "<p>Project name (slug): <input type='text' name='slug' "
-        "placeholder='(defaults to the .mod filename)'></p>"
-        "<p>Module file (.mod): <input type='file' name='module' "
-        "accept='.mod,.erf' required></p>"
-        "<p>Extra files (optional, dropped into unpacked/): "
-        "<input type='file' name='extra' multiple></p>"
-        "<input type='submit' value='Upload &amp; ingest'></form>"
-        "<p class='note'>Ingest runs <code>nwn-manager init</code> and unpacks "
-        "the module into its own project subdirectory.</p></div>"
-        % gurl("/projects/new"))
-    prereq = ("<p class='note'>Requires <code>nasher</code>, <code>nwn_gff</code>, "
-              "<code>nwn_script_comp</code> and <code>python3</code> on PATH "
-              "(build/wiki jobs fail loudly otherwise).</p>")
     return page("NWN module console",
-                "<h2>Projects</h2>%s%s%s" % (listing, upload, prereq))
+                "<h2>Projects</h2>%s%s%s"
+                % (listing, upload_form_html(), PREREQ_NOTE))
+
+
+# --- Start page (ingestion) -------------------------------------------------
+
+def root_mod_files():
+    """Sorted .mod/.erf files the user has dropped into LANDING_DIR."""
+    if not LANDING_DIR or not os.path.isdir(LANDING_DIR):
+        return []
+    out = []
+    for f in sorted(os.listdir(LANDING_DIR)):
+        if f.lower().endswith((".mod", ".erf")) \
+                and os.path.isfile(os.path.join(LANDING_DIR, f)):
+            out.append(os.path.join(LANDING_DIR, f))
+    return out
+
+
+def render_root_mods():
+    """{{ROOT_MODS}} fragment: one ingest form per detected root module."""
+    mods = root_mod_files()
+    if not mods:
+        return ("<p class='note'>No modules found in the drop folder "
+                "(<code>%s</code>). Copy a <code>.mod</code> there, or use the "
+                "upload form.</p>" % esc(LANDING_DIR or "?"))
+    rows = []
+    for path in mods:
+        base = os.path.basename(path)
+        default_slug = sanitize_slug(os.path.splitext(base)[0])
+        rows.append(
+            "<form method='post' action='%s' class='mod-row'>"
+            "<input type='hidden' name='file' value='%s'>"
+            "<b>%s</b> - slug "
+            "<input type='text' name='slug' value='%s'> "
+            "<button type='submit'>Ingest</button></form>" %
+            (gurl("/projects/ingest-root"), esc(base), esc(base),
+             esc(default_slug)))
+    return "".join(rows)
+
+
+# Built-in fallback used only when start.html is missing from LANDING_DIR.
+# The committed start.html file is the canonical, user-editable version.
+DEFAULT_START_HTML = """<!doctype html>
+<html><head><meta charset='utf-8'><title>Ingest a module</title>
+<style>{{CSS}}</style></head><body>
+<h1>Ingest a module</h1>
+<p><a href="{{CONSOLE}}">&#8594; Open the full console (all projects)</a></p>
+<div class="card"><h2>Modules in the drop folder</h2>{{ROOT_MODS}}</div>
+{{UPLOAD_FORM}}
+{{PREREQ}}
+</body></html>
+"""
+
+
+def render_start():
+    """Serve the editable start.html (token-substituted); fallback if absent.
+
+    start.html is a full HTML document; the console only substitutes the
+    {{TOKEN}} slots, so editing everything else in the file is safe. The
+    dynamic slots carry proxy-aware URLs, so the page works behind --url-prefix.
+    """
+    tmpl = DEFAULT_START_HTML
+    if LANDING_DIR:
+        path = os.path.join(LANDING_DIR, "start.html")
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    tmpl = fh.read()
+            except OSError:
+                pass
+    return (tmpl.replace("{{CSS}}", CSS)
+                .replace("{{ROOT_MODS}}", render_root_mods())
+                .replace("{{UPLOAD_FORM}}", upload_form_html())
+                .replace("{{PREREQ}}", PREREQ_NOTE)
+                .replace("{{CONSOLE}}", gurl("/")))
 
 
 def render_project_home(proj):
@@ -1073,6 +1154,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/":
                 self._send(render_dashboard())
+            elif path == "/start":
+                self._send(render_start())
             elif path.startswith("/jobs/"):
                 job = get_job(path[len("/jobs/"):])
                 if not job:
@@ -1162,6 +1245,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not SINGLE_MODE and path == "/projects/new":
                 self._create_project()
+                return
+            if not SINGLE_MODE and path == "/projects/ingest-root":
+                self._ingest_root(self._form())
                 return
             if SINGLE_MODE:
                 _req.project = SINGLE_PROJECT
@@ -1286,6 +1372,45 @@ class Handler(BaseHTTPRequestHandler):
             with open(sp, "wb") as fh:
                 fh.write(data)
             extras.append((bn, sp))
+        self._start_ingest(slug, mod_path, extras, cleanup=stage)
+
+    def _ingest_root(self, form):
+        """Ingest a .mod/.erf the user dropped into LANDING_DIR (the repo root)."""
+        chosen = safe_basename(form.get("file", [""])[0])
+        want = form.get("slug", [""])[0].strip()
+        detected = {os.path.basename(p) for p in root_mod_files()}
+        if chosen not in detected:
+            self._send(page("Ingest error",
+                            "<p class='err'>No such module in the drop folder.</p>"
+                            "<p><a href='%s'>Back to start</a></p>" % gurl("/start")),
+                       400)
+            return
+        mod_path = os.path.join(LANDING_DIR, chosen)
+        slug = sanitize_slug(want or os.path.splitext(chosen)[0])
+        if not slug:
+            self._send(page("Ingest error",
+                            "<p class='err'>Could not derive a project name.</p>"
+                            "<p><a href='%s'>Back to start</a></p>" % gurl("/start")),
+                       400)
+            return
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
+        if os.path.exists(proj_dir):
+            self._send(page("Ingest error",
+                            "<p class='err'>Project %r already exists.</p>"
+                            "<p><a href='%s'>Back to start</a></p>"
+                            % (slug, gurl("/start"))), 409)
+            return
+        # No copy: the module intentionally lives in the root; `init` records it
+        # as .nasher/source so re-ingest keeps working while the file remains.
+        self._start_ingest(slug, mod_path, extras=[], cleanup=None)
+
+    def _start_ingest(self, slug, mod_path, extras=(), cleanup=None):
+        """Kick a background `nwn-manager init` job and redirect to its status.
+
+        extras: list of (basename, staged_path) copied into unpacked/ on success.
+        cleanup: optional temp dir removed once the job finishes.
+        """
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
 
         def on_success(job):
             unpacked = os.path.join(proj_dir, "unpacked")
@@ -1295,7 +1420,8 @@ class Handler(BaseHTTPRequestHandler):
                     job.add("[console] copied extra file %s -> unpacked/" % bn)
                 except OSError as exc:
                     job.add("[console] WARN could not copy %s: %s" % (bn, exc))
-            shutil.rmtree(stage, ignore_errors=True)
+            if cleanup:
+                shutil.rmtree(cleanup, ignore_errors=True)
 
         job = Job("Ingest %s" % slug,
                   [NWN_MANAGER, "init", proj_dir, mod_path],
@@ -1382,9 +1508,15 @@ def main():
                          "shell's {{ROOT}} asset paths")
     ap.add_argument("--nwn-manager", default=None,
                     help="path to the nwn-manager wrapper (default: sibling in bin/)")
+    ap.add_argument("--landing-dir", default=None,
+                    help="where start.html lives and dropped .mod files are "
+                         "scanned (default: the repo root above bin/)")
     args = ap.parse_args()
 
+    global LANDING_DIR
     NWN_MANAGER = _find_nwn_manager(args.nwn_manager)
+    LANDING_DIR = os.path.abspath(
+        args.landing_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     Handler.url_prefix = args.url_prefix.rstrip("/")
     NAV_EXTRA[:] = [(label, url) for label, _, url in
                     (n.partition("=") for n in args.nav) if url]
@@ -1408,7 +1540,11 @@ def main():
 
     print("nwn-manager: %s" % NWN_MANAGER)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print("Serving on http://%s:%d/ (Ctrl-C to stop)" % (args.host, args.port))
+    base = "http://%s:%d%s" % (args.host, args.port, Handler.url_prefix)
+    print("Serving on %s/ (Ctrl-C to stop)" % base, flush=True)
+    if not SINGLE_MODE:
+        print("  ingest start page: %s/start   (drop folder: %s)"
+              % (base, LANDING_DIR), flush=True)
     srv.serve_forever()
 
 
