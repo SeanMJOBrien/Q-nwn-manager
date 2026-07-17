@@ -517,6 +517,11 @@ MUSIC_FIELDS = [
     ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
     ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
 ]
+# Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
+# sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
+AREA_FLAG_INTERIOR = 1
+AREA_FLAG_UNDERGROUND = 2
+AREA_FLAG_NATURAL = 4
 
 
 def are_path(root, res):
@@ -528,6 +533,17 @@ def area_resrefs(root):
                   if f.endswith(".are.json"))
 
 
+def area_type_label(flags):
+    parts = []
+    if flags & AREA_FLAG_NATURAL:
+        parts.append("Outside")
+    if flags & AREA_FLAG_INTERIOR:
+        parts.append("Interior")
+    if flags & AREA_FLAG_UNDERGROUND:
+        parts.append("Underground")
+    return ", ".join(parts) if parts else "(unset)"
+
+
 def area_row(root, res):
     d = load_cached(are_path(root, res))
     return {
@@ -535,6 +551,7 @@ def area_row(root, res):
         "name": loc_get(d, "Name"),
         "tag": getv(d, "Tag", ""),
         "tileset": getv(d, "Tileset", ""),
+        "flags": getv(d, "Flags", 0),
         "scripts": {f: getv(d, f, "") for f in AREA_SCRIPT_FIELDS},
     }
 
@@ -542,6 +559,9 @@ def area_row(root, res):
 def render_areas(root, query):
     q = (query.get("q", [""])[0]).lower()
     tileset = query.get("tileset", [""])[0]
+    f_outside = query.get("outside", [""])[0] == "1"
+    f_interior = query.get("interior", [""])[0] == "1"
+    f_underground = query.get("underground", [""])[0] == "1"
     rows = [area_row(root, r) for r in area_resrefs(root)]
     tilesets = sorted({r["tileset"] for r in rows})
     if q:
@@ -549,12 +569,30 @@ def render_areas(root, query):
                 or q in r["name"].lower() or q in r["tag"].lower()]
     if tileset:
         rows = [r for r in rows if r["tileset"] == tileset]
+    if f_outside:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_NATURAL]
+    if f_interior:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_INTERIOR]
+    if f_underground:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_UNDERGROUND]
     opts = "".join("<option value='%s'%s>%s</option>" %
                    (esc(t), " selected" if t == tileset else "", esc(t or "(any)"))
                    for t in [""] + tilesets)
+
+    def cb(name, label, checked):
+        return ("<label><input type='checkbox' name='%s' value='1'%s> %s</label>" %
+                (name, " checked" if checked else "", label))
     filt = ("<form method='get'>Filter: <input type='text' name='q' value='%s'> "
             "Tileset: <select name='tileset'>%s</select> "
-            "<input type='submit' value='Apply filter'></form>" % (esc(q), opts))
+            "Type: %s %s %s "
+            "<input type='submit' value='Apply filter'></form>"
+            "<p class='note'>Type checkboxes narrow the list (all checked "
+            "boxes must match); an area can be more than one type "
+            "(e.g. an underground cave interior).</p>" %
+            (esc(q), opts,
+             cb("outside", "Outside", f_outside),
+             cb("interior", "Interior", f_interior),
+             cb("underground", "Underground", f_underground)))
     # The filter form and "With selected" buttons live in a sticky toolbar
     # pinned above the scrolling table; the buttons use form='areasSelect' to
     # submit the checkbox-selection form below despite being outside it in
@@ -572,16 +610,17 @@ def render_areas(root, query):
         "<table class='areas'><thead><tr><th><input type='checkbox' "
         "onclick=\"document.querySelectorAll('input[name=res]')"
         ".forEach(c=>c.checked=this.checked)\"></th>"
-        "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th>"
+        "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th><th>Type</th>"
         "<th>OnEnter</th><th>OnExit</th><th>OnHeartbeat</th><th>OnUserDefined</th></tr></thead>"
         "<tbody>"]
     for r in rows:
         body.append(
             "<tr><td><input type='checkbox' name='res' value='%s'></td>"
             "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-            "<td>%s</td><td>%s</td><td>%s</td></tr>" %
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
             tuple(esc(x) for x in (
                 r["res"], r["res"], r["name"], r["tag"], r["tileset"],
+                area_type_label(r["flags"]),
                 r["scripts"]["OnEnter"], r["scripts"]["OnExit"],
                 r["scripts"]["OnHeartbeat"], r["scripts"]["OnUserDefined"])))
     body.append("</tbody></table></form>")
@@ -1150,6 +1189,7 @@ def render_project_home(proj):
                     % purl("/wiki")]
     if proj.has_wiki():
         wiki_actions.append("<a href='%s'>View wiki</a>" % purl("/wiki/"))
+        wiki_actions.append("<a href='%s'>View map</a>" % purl("/wiki/map/"))
     rows.append("<div class='card'><h3>Wiki</h3><div class='actions'>%s</div>"
                 "<p class='note'>Runs <code>nwn-manager wiki</code> "
                 "(~30s), served here at %s.</p></div>"
