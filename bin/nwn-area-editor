@@ -57,6 +57,7 @@ SINGLE_MODE = False     # True when launched with --dir instead of --projects-di
 SINGLE_PROJECT = None   # the implicit Project in single-dir mode
 NWN_MANAGER = None      # path to the nwn-manager wrapper (for init/unpack/wiki/repack)
 LANDING_DIR = None      # where start.html lives and dropped .mod files are scanned
+SERVER = None           # the ThreadingHTTPServer (for the /shutdown "Stop" button)
 
 # Per-request context (ThreadingHTTPServer gives one thread per request).
 _req = threading.local()
@@ -182,6 +183,8 @@ input[type=text],input[type=number],input[type=file],select{background:#2a2b31;
 input[type=submit],button{background:#39507a;color:#fff;border:0;
  padding:.4em 1em;cursor:pointer;margin:.2em}
 .nav a{margin-right:1.2em} .note{color:#9a9;font-style:italic}
+.nav{overflow:hidden} .nav .stop-console{display:inline;float:right;margin:0}
+.nav .stop-console button{background:#7a3939;padding:.25em .8em;margin:0}
 .warn{color:#e6a23c} .err{color:#f66} .ok{color:#8c6}
 fieldset{border:1px solid #555;margin:.8em 0} legend{padding:0 .5em}
 .card{border:1px solid #444;background:#25262c;border-radius:6px;padding:.8em 1.1em;margin:.8em 0}
@@ -233,7 +236,10 @@ def _nav():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
             if _has_wiki_current():
                 links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
-    return "<div class='nav'>%s%s</div>" % ("".join(links), extra)
+    stop = ("<form method='post' action='%s' class='stop-console' "
+            "onsubmit=\"return confirm('Stop the console server?')\">"
+            "<button type='submit'>Stop console</button></form>" % gurl("/shutdown"))
+    return "<div class='nav'>%s%s%s</div>" % ("".join(links), extra, stop)
 
 
 def _has_wiki_current():
@@ -959,30 +965,45 @@ FALLBACK_START_HTML = """<!doctype html><html lang="en"><head><meta charset="utf
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ingest a module</title>
 <style>body{font-family:system-ui,sans-serif;margin:1.5em;max-width:60em;
-background:#1e1f24;color:#d8d9de}a{color:#7ab3ff}.card{border:1px solid #444;
-background:#25262c;border-radius:6px;padding:.8em 1.1em;margin:1em 0}
-input[type=text],input[type=file]{background:#2a2b31;color:#d8d9de;
+background:#1e1f24;color:#d8d9de}a{color:#7ab3ff}code,pre{background:#11131a;
+border-radius:4px}pre{padding:.7em .9em;overflow:auto}code{padding:.1em .35em}
+.card{border:1px solid #444;background:#25262c;border-radius:6px;padding:.8em 1.1em;
+margin:1em 0}input[type=text],input[type=file]{background:#2a2b31;color:#d8d9de;
 border:1px solid #555;padding:.3em}button{background:#39507a;color:#fff;border:0;
 padding:.5em 1.1em;cursor:pointer;border-radius:4px;font-size:1em}
-.note{color:#9a9;font-style:italic}</style></head><body>
+button.stop{background:#7a3939}.note{color:#9a9;font-style:italic}.ok{color:#8c6}</style>
+</head><body>
 <h1>Ingest a module</h1>
-<div class="card"><h2>Upload a module</h2>
+<div class="card" id="startbox"><h2>1. Start the console</h2>
+<p>From the repository root<span id="repodir"></span>, run:</p>
+<pre><code>bin/nwn-manager console</code></pre>
+<p class="note">Leave it running, then reload this page.</p></div>
+<div class="card" id="runningbox" style="display:none">
+<p><span class="ok">&#9679; Console is running.</span>
+<form data-console="/shutdown" method="post" style="display:inline"
+onsubmit="return confirm('Stop the console server?')">
+<button type="submit" class="stop">Stop console</button></form></p></div>
+<div class="card"><h2>2. Upload a module</h2>
 <form data-console="/projects/new" method="post" enctype="multipart/form-data">
 <p>Module (.mod/.erf): <input type="file" name="module" accept=".mod,.erf" required></p>
 <p>Slug: <input type="text" name="slug" placeholder="(defaults to file name)"></p>
 <button type="submit">Upload &amp; ingest</button></form></div>
-<div class="card"><h2>Modules in the drop folder</h2>
+<div class="card"><h2>&hellip; or from the drop folder</h2>
 <div id="rootmods"><p class="note">Loading...</p></div></div>
 <p class="note">(built-in fallback - restore start.html to customise)</p>
 <script>
 var CONSOLE_URL="http://127.0.0.1:8341";
-var base=location.protocol.indexOf("http")===0?
-  location.pathname.replace(/\\/start\\/?$/,""):CONSOLE_URL;
+var served=location.protocol.indexOf("http")===0;
+var base=served?location.pathname.replace(/\\/start\\/?$/,""):CONSOLE_URL;
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){
   return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c];});}
 document.querySelectorAll("form[data-console]").forEach(function(f){
   f.setAttribute("action",base+f.getAttribute("data-console"));});
+if(!served){var dir=decodeURIComponent(location.pathname).replace(/\\/[^\\/]*$/,"");
+  if(dir)document.getElementById("repodir").textContent=" ("+dir+")";}
 fetch(base+"/api/root-mods").then(function(r){return r.json();}).then(function(d){
+  document.getElementById("startbox").style.display="none";
+  document.getElementById("runningbox").style.display="";
   var el=document.getElementById("rootmods");
   if(!d.mods||!d.mods.length){el.innerHTML="<p class='note'>No modules in the drop folder.</p>";return;}
   el.innerHTML=d.mods.map(function(m){return "<form method='post' action='"+esc(base)
@@ -990,7 +1011,7 @@ fetch(base+"/api/root-mods").then(function(r){return r.json();}).then(function(d
     +"'><b>"+esc(m)+"</b> <input type='text' name='slug' value='"
     +esc(m.replace(/\\.[^.]*$/,""))+"'> <button type='submit'>Ingest</button></form>";}).join("");
 }).catch(function(){document.getElementById("rootmods").innerHTML=
-  "<p class='note'>Couldn't reach the console at "+esc(base||CONSOLE_URL)+".</p>";});
+  "<p class='note'>Start the console (step 1) to list the drop folder.</p>";});
 </script></body></html>"""
 
 
@@ -1253,6 +1274,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = urllib.parse.urlparse(self.path)
         path = self._strip_proxy(raw.path)
         try:
+            if path == "/shutdown":
+                self._shutdown()
+                return
             if not SINGLE_MODE and path == "/projects/new":
                 self._create_project()
                 return
@@ -1341,6 +1365,27 @@ class Handler(BaseHTTPRequestHandler):
             job.phase = "starting build"
         start_job(job)
         self._redirect(gurl("/jobs/" + job.id))
+
+    def _shutdown(self):
+        """Stop the console server (the 'Stop console' button)."""
+        self._send(page("Console stopped",
+                        "<p class='ok'>The console has been stopped. You can "
+                        "close this tab.</p>"
+                        "<p class='note'>To start it again, run "
+                        "<code>bin/nwn-manager console</code> from the repository "
+                        "root, then reload.</p>"))
+
+        def _stop():
+            time.sleep(0.3)
+            try:
+                if SERVER is not None:
+                    SERVER.shutdown()
+                else:
+                    os._exit(0)
+            except Exception:  # noqa: BLE001
+                os._exit(0)
+
+        threading.Thread(target=_stop, daemon=True).start()
 
     def _create_project(self):
         fields, files = parse_multipart(self.headers, self.rfile)
@@ -1547,8 +1592,10 @@ def main():
         os.makedirs(PROJECTS_DIR, exist_ok=True)
         print("projects dir: %s" % PROJECTS_DIR)
 
+    global SERVER
     print("nwn-manager: %s" % NWN_MANAGER)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    SERVER = srv
     base = "http://%s:%d%s" % (args.host, args.port, Handler.url_prefix)
     print("Serving on %s/ (Ctrl-C to stop)" % base, flush=True)
     if not SINGLE_MODE:

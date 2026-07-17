@@ -9,13 +9,18 @@
        background:#1e1f24;color:#d8d9de}
   a{color:#7ab3ff}
   h1{margin-top:0}
+  code,pre{background:#11131a;border-radius:4px}
+  code{padding:.1em .35em}
+  pre{padding:.7em .9em;overflow:auto}
   .card{border:1px solid #444;background:#25262c;border-radius:6px;
         padding:.8em 1.1em;margin:1em 0}
   input[type=text],input[type=file]{background:#2a2b31;color:#d8d9de;
         border:1px solid #555;padding:.3em .4em}
   button{background:#39507a;color:#fff;border:0;padding:.5em 1.1em;cursor:pointer;
         margin:.2em 0;border-radius:4px;font-size:1em}
+  button.stop{background:#7a3939}
   .note{color:#9a9;font-style:italic}
+  .ok{color:#8c6}
   .mod-row{margin:.4em 0}
   .mod-row input[type=text]{width:14em}
 </style>
@@ -23,15 +28,40 @@
 <body>
 
 <h1>Ingest a module</h1>
-<p class="note">Create a new project from a Neverwinter Nights
-  <code>.mod</code> (or <code>.erf</code>). Ingesting unpacks the module into
-  its own project you can then edit, wiki, build, and download from the console.</p>
-<p><a id="console-link" href="http://127.0.0.1:8341/">&#8594; Open the full
-  console (manage all projects)</a></p>
+
+<!-- Start instructions: a browser page cannot launch the console itself, so
+     show the command + where to run it. Hidden by JS once the console is up. -->
+<div class="card" id="startbox">
+  <h2>1. Start the console</h2>
+  <p>The upload / ingest actions below talk to the console, so it needs to be
+     running first. From the <b>repository root</b><span id="repodir"></span>,
+     run:</p>
+  <pre><code>bin/nwn-manager console</code></pre>
+  <p class="note">(or just <code>nwn-manager console</code> if it is on your
+     PATH). It prints a line like <code>Serving on http://127.0.0.1:8341/</code>.
+     Leave it running, then <a href="" onclick="location.reload();return false;"
+     >reload this page</a>.</p>
+</div>
+
+<!-- Shown by JS only when the console is reachable. -->
+<div class="card" id="runningbox" style="display:none">
+  <p><span class="ok">&#9679; Console is running.</span>
+    <a id="console-link" href="http://127.0.0.1:8341/">Open the full console</a>
+    &nbsp;
+    <form data-console="/shutdown" method="post" style="display:inline"
+          onsubmit="return confirm('Stop the console server?')">
+      <button type="submit" class="stop">Stop console</button>
+    </form>
+  </p>
+</div>
+
+<p class="note">Ingesting creates a new project from a Neverwinter Nights
+  <code>.mod</code> (or <code>.erf</code>) that you can then edit, wiki, build,
+  and download from the console.</p>
 
 <!-- Upload: pick a .mod from anywhere and ingest it. -->
 <div class="card">
-  <h2>Upload a module</h2>
+  <h2>2. Upload a module</h2>
   <form data-console="/projects/new" method="post" enctype="multipart/form-data">
     <p>Module file (.mod / .erf):
        <input type="file" name="module" accept=".mod,.erf" required></p>
@@ -43,17 +73,14 @@
   </form>
 </div>
 
-<!-- Drop folder: modules the user copied next to this page, listed by the
-     console via /api/root-mods (populated by the script below). -->
+<!-- Drop folder: modules copied next to this page, listed via /api/root-mods. -->
 <div class="card">
-  <h2>Modules in the drop folder</h2>
+  <h2>&hellip; or ingest a module from the drop folder</h2>
   <div id="rootmods"><p class="note">Loading&#8230;</p></div>
 </div>
 
-<p class="note">Needs the console running: <code>nwn-manager console</code>
-  (default <code>http://127.0.0.1:8341</code>). Also requires
-  <code>nasher</code>, <code>nwn_gff</code>, <code>nwn_script_comp</code> and
-  <code>python3</code> on PATH.</p>
+<p class="note">Requires <code>nasher</code>, <code>nwn_gff</code>,
+  <code>nwn_script_comp</code> and <code>python3</code> on PATH.</p>
 
 <script>
 // If you OPEN THIS FILE DIRECTLY and your console is not on the default
@@ -70,14 +97,24 @@ function esc(s){ return String(s).replace(/[&<>"']/g, function(c){
 function slugify(s){ return s.toLowerCase().replace(/\.[^.]*$/, "")
   .replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); }
 
-document.getElementById("console-link").href = base + "/";
+// Point every data-console form at the running console.
 document.querySelectorAll("form[data-console]").forEach(function(f){
   f.setAttribute("action", base + f.getAttribute("data-console"));
 });
+document.getElementById("console-link").href = base + "/";
 
+// When opened as a file, show which folder to run the command from.
+if(!served){
+  var dir = decodeURIComponent(location.pathname).replace(/\/[^\/]*$/, "");
+  if(dir) document.getElementById("repodir").textContent = " (" + dir + ")";
+}
+
+// Reachability check: also toggles the start instructions vs the running box.
 fetch(base + "/api/root-mods")
   .then(function(r){ return r.json(); })
   .then(function(d){
+    document.getElementById("startbox").style.display = "none";
+    document.getElementById("runningbox").style.display = "";
     var el = document.getElementById("rootmods");
     if(!d.mods || !d.mods.length){
       el.innerHTML = "<p class='note'>No modules found in the drop folder"
@@ -96,11 +133,10 @@ fetch(base + "/api/root-mods")
     }).join("");
   })
   .catch(function(){
+    // Console not running: leave the start instructions visible.
     document.getElementById("rootmods").innerHTML =
-      "<p class='note'>Couldn't reach the console at <code>"
-      + esc(base || CONSOLE_URL) + "</code>. Start it with "
-      + "<code>nwn-manager console</code> (or edit CONSOLE_URL in this file), "
-      + "then reload.</p>";
+      "<p class='note'>Start the console (step 1) to list modules in the drop "
+      + "folder.</p>";
   });
 </script>
 

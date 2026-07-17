@@ -316,10 +316,14 @@ served at **`/start`** (printed on launch). Two ways to ingest:
 - **Drop a `.mod`/`.erf` into the repo root** (the drop folder; override with
   `--landing-dir`) — the page lists it with an **Ingest** button.
 
-Both need the console running (default `http://127.0.0.1:8341`). The upload
-form posts to the console, and the drop-folder list is fetched from the
-console's `GET /api/root-mods` (served CORS-open so the page works even from
-`file://`). When you open the file directly and your console is on a
+Both need the console running (default `http://127.0.0.1:8341`). Since a browser
+page can't launch a process, `start.html` shows a **"Start the console"** step at
+the top — the command (`bin/nwn-manager console`) and, when opened as a file, the
+folder to run it from — until it detects the console is up. Once reachable it
+shows a **Stop console** button instead (also in the nav on every console page;
+`POST /shutdown`). The upload form posts to the console, and the drop-folder list
+is fetched from the console's `GET /api/root-mods` (served CORS-open so the page
+works even from `file://`). When you open the file directly and your console is on a
 non-default address, edit the one `CONSOLE_URL` line near the bottom of
 `start.html`; when the page is served at `/start` that value is ignored and
 same-origin URLs are used, so ports and `--url-prefix` just work. `start.html`
