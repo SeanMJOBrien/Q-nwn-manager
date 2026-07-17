@@ -194,6 +194,13 @@ fieldset{border:1px solid #555;margin:.8em 0} legend{padding:0 .5em}
 pre.log{background:#111318;color:#c6d0d9;padding:.8em;border-radius:6px;
  max-height:24em;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .phase{font-weight:bold} h2{margin-top:1.4em}
+.sticky-toolbar{position:sticky;top:0;z-index:3;background:#1e1f24;
+ padding:.5em 0;border-bottom:1px solid #444}
+.sticky-toolbar .selected-actions{margin-top:.3em}
+table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
+.cancel-link{display:inline-block;padding:.4em 1em;margin:.2em;border:1px solid #555;
+ border-radius:3px;color:#d8d9de;text-decoration:none}
+.cancel-link:hover{background:#2a2b31}
 """
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
@@ -213,6 +220,12 @@ legend{padding:0 .5em;font-weight:bold}
 pre.log{background:#0003;padding:.8em;border-radius:6px;max-height:24em;
  overflow:auto;white-space:pre-wrap;word-break:break-word}
 input[type=submit],button{padding:.35em 1em;cursor:pointer;margin:.2em}
+.sticky-toolbar{position:sticky;top:0;z-index:3;background:Canvas;
+ padding:.5em 0;border-bottom:1px solid #8886}
+.sticky-toolbar .selected-actions{margin-top:.3em}
+table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
+.cancel-link{display:inline-block;padding:.35em 1em;margin:.2em;border:1px solid #8886;
+ border-radius:3px;text-decoration:none}
 """
 
 
@@ -542,13 +555,26 @@ def render_areas(root, query):
     filt = ("<form method='get'>Filter: <input type='text' name='q' value='%s'> "
             "Tileset: <select name='tileset'>%s</select> "
             "<input type='submit' value='Apply filter'></form>" % (esc(q), opts))
-    body = [filt,
-            "<form method='post' action='%s'>" % purl("/areas/select"),
-            "<table><tr><th><input type='checkbox' "
-            "onclick=\"document.querySelectorAll('input[name=res]')"
-            ".forEach(c=>c.checked=this.checked)\"></th>"
-            "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th>"
-            "<th>OnEnter</th><th>OnExit</th><th>OnHeartbeat</th><th>OnUserDefined</th></tr>"]
+    # The filter form and "With selected" buttons live in a sticky toolbar
+    # pinned above the scrolling table; the buttons use form='areasSelect' to
+    # submit the checkbox-selection form below despite being outside it in
+    # the DOM (position:sticky can't span the toolbar + table as one block,
+    # since the table body needs to scroll underneath both).
+    body = [
+        "<div class='sticky-toolbar' id='areasToolbar'>", filt,
+        "<div class='selected-actions'>With selected: "
+        "<button form='areasSelect' name='action' value='scripts'>Edit scripts</button>"
+        "<button form='areasSelect' name='action' value='lighting'>Edit lighting/fog</button>"
+        "<button form='areasSelect' name='action' value='music'>Edit music</button>"
+        "<button form='areasSelect' name='action' value='tags'>Edit tags</button>"
+        "</div></div>",
+        "<form id='areasSelect' method='post' action='%s'>" % purl("/areas/select"),
+        "<table class='areas'><thead><tr><th><input type='checkbox' "
+        "onclick=\"document.querySelectorAll('input[name=res]')"
+        ".forEach(c=>c.checked=this.checked)\"></th>"
+        "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th>"
+        "<th>OnEnter</th><th>OnExit</th><th>OnHeartbeat</th><th>OnUserDefined</th></tr></thead>"
+        "<tbody>"]
     for r in rows:
         body.append(
             "<tr><td><input type='checkbox' name='res' value='%s'></td>"
@@ -558,14 +584,22 @@ def render_areas(root, query):
                 r["res"], r["res"], r["name"], r["tag"], r["tileset"],
                 r["scripts"]["OnEnter"], r["scripts"]["OnExit"],
                 r["scripts"]["OnHeartbeat"], r["scripts"]["OnUserDefined"])))
-    body.append("</table>")
-    body.append("With selected: "
-                "<button name='action' value='scripts'>Edit scripts</button>"
-                "<button name='action' value='lighting'>Edit lighting/fog</button>"
-                "<button name='action' value='music'>Edit music</button>"
-                "<button name='action' value='tags'>Edit tags</button>"
-                "</form>")
+    body.append("</tbody></table></form>")
     body.append("<p class='note'>%d areas shown.</p>" % len(rows))
+    # Keep the sticky table header pinned just below the toolbar rather than
+    # under it: measure the toolbar's actual rendered height (its content -
+    # filter fields, button count - can wrap differently across browsers/
+    # widths, so a fixed offset would drift) and apply it as the thead's
+    # sticky top offset.
+    body.append(
+        "<script>(function(){"
+        "var tb=document.getElementById('areasToolbar');"
+        "var ths=document.querySelectorAll('table.areas thead th');"
+        "function sync(){ if(!tb) return;"
+        " var px=tb.offsetHeight+'px';"
+        " ths.forEach(function(c){ c.style.top=px; }); }"
+        "sync(); window.addEventListener('resize', sync);"
+        "})();</script>")
     return page("Areas", "".join(body))
 
 
@@ -582,9 +616,10 @@ def render_scripts_form(root, resrefs):
             "<th>Current value(s)</th></tr>%s</table>"
             "<p class='note'>Blank = leave unchanged. Enter <b>-</b> to clear "
             "a script. Max 16 chars, no extension.</p>"
-            "<input type='submit' value='Apply to selected areas'></form>" %
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/apply"),
-             hidden_resrefs(resrefs), inputs))
+             hidden_resrefs(resrefs), inputs, purl("/areas")))
     return page("Bulk edit area scripts", body)
 
 
@@ -634,10 +669,11 @@ def render_lighting_form(root, resrefs):
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
             "<th>Hint</th></tr>%s</table></fieldset>"
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
-            "<input type='submit' value='Apply to selected areas'></form>" %
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/apply"),
              hidden_resrefs(resrefs),
-             esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows))
+             esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows, purl("/areas")))
     return page("Bulk edit lighting & fog", body)
 
 
@@ -681,9 +717,10 @@ def render_music_form(root, resrefs):
             "Day/Night/Battle values are row indices into ambientmusic.2da "
             "(look them up with the toolset's music picker or nwn-mcp's "
             "resolve_2da/search_2da tools) - not resrefs.</p>"
-            "<input type='submit' value='Apply to selected areas'></form>" %
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
-             hidden_resrefs(resrefs), esc(resrefs[0]), rows))
+             hidden_resrefs(resrefs), esc(resrefs[0]), rows, purl("/areas")))
     return page("Bulk edit area music", body)
 
 
@@ -722,8 +759,10 @@ def render_tags_form(root, resrefs):
             ".gic.json files on disk and rewrites the ResRef field, but does "
             "NOT update door/trigger transitions in other areas that target "
             "the old resref - search those separately.</p>"
-            "<input type='submit' value='Apply'></form>" %
-            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows)))
+            "<input type='submit' value='Apply'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows),
+             purl("/areas")))
     return page("Edit area tags / resrefs", body)
 
 
