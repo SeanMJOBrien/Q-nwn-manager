@@ -9,6 +9,15 @@ A local, dependency-free (Python 3 stdlib only) web app for selective bulk
 editing of NWN:EE GFF data. All edits round-trip through `nwn_gff`
 (GFF -> JSON -> edit -> GFF); only submitted, non-blank fields change.
 
+> **Managing whole projects (upload / wiki / build / download)?** Use the
+> multi-project **web console** instead: `nwn-manager console` (see the repo
+> README "Web console" section). It hosts a home page to upload/ingest a `.mod`
+> into a new project, rebuild its wiki, build & download the packed `.mod`, and
+> bulk-edit areas + creatures + module info — all JSON-native against a nasher
+> `unpacked/` tree, with background-job progress. This `nwn_web_editor.py`
+> remains the tool for editing player **`.bic`** character files (binary GFF
+> under a servervault), which live outside a project's `unpacked/`.
+
 ## Launch
 
 ```bash

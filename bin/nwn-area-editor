@@ -1,43 +1,86 @@
 #!/usr/bin/env python3
-"""nwn-area-editor - stdlib-only web app for bulk-editing NWN:EE area GFF JSON.
+"""nwn-console - stdlib-only multi-project web console for NWN:EE modules.
 
-JSON-native sibling of nwn_web_editor.py's Areas section: instead of shelling
-out to nwn_gff to round-trip binary .are files, this reads/writes the same
-GFF-as-JSON documents nwn-manager already keeps under version control
-(<resref>.are.json, produced by `nwn-manager unpack` / nwn_gff -k json).
+Home page (dashboard) lets you:
+  - UPLOAD a .mod (+ optional loose files) -> ingested into a new project
+    (its own subdirectory under --projects-dir) via `nwn-manager init`
+  - per project: REBUILD the project-specific wiki (`nwn-manager wiki`)
+  - per project: BUILD & DOWNLOAD the packed .mod (`nwn-manager repack`)
+  - per project: bulk-edit areas (event scripts, lighting/fog, tags/resrefs)
 
-Route contract (path, query args, form fields) matches nwn_web_editor.py's
-/areas endpoints exactly, since nwn-wiki's "Edit this area" links (emitted
-per wiki-theme/editor.json) are generated once and expected to work against
-either editor.
+Each project is a nasher project dir (nasher.cfg + unpacked/*.are.json ...),
+managed, viewed, and built independently. Long operations (build ~minutes,
+wiki ~30s, ingest) run as background jobs with a live-progress page.
 
-Pages:
-  /areas       - list areas (filter by name/tag, group by tileset), select
-                 via checkbox, then bulk-edit event scripts, lighting/fog,
-                 or tags/resrefs.
-  /areas/edit  - direct-link entry point used by generated wiki pages:
-                 /areas/edit?res=X[&res=Y...]&action=scripts|lighting|tags
+This is the JSON-native evolution of the old nwn-area-editor: it reads/writes
+the GFF-as-JSON documents nwn-manager keeps under version control
+(<resref>.are.json, produced by `nwn-manager unpack` / nwn_gff -k json), so no
+per-file nwn_gff round-trips are needed.
+
+Modes:
+  Multi-project (console):  --projects-dir DIR   (dashboard at /, /p/<slug>/...)
+  Legacy single-dir:        --dir DIR            (area editor only, no prefix)
 
 Safety:
   - binds 127.0.0.1 only (use --host to override deliberately)
   - first edit of any file writes a one-time <file>.json.bak sibling backup
   - only submitted, non-blank fields are changed; everything else round-trips
     byte-identically (plain JSON load/dump, no GFF conversion involved)
+  - static wiki + download file serving is path-traversal guarded
 
 Usage:
-  python3 nwn-area-editor --dir /path/to/unpacked [--git-dir DIR] [--gic-dir DIR]
-                           [--port 8341] [--url-prefix /qedit]
+  nwn-manager console [--projects-dir DIR] [--port 8341] [--url-prefix /qedit]
+  python3 nwn-area-editor --dir /path/to/unpacked   # legacy single-project
 """
 
 import argparse
+import glob
 import html
 import json
+import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
+import threading
+import time
 import urllib.parse
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# --- Runtime config (set in main) -------------------------------------------
+
+PROJECTS_DIR = None    # multi-project root (None in legacy single-dir mode)
+SINGLE_MODE = False     # True when launched with --dir instead of --projects-dir
+SINGLE_PROJECT = None   # the implicit Project in single-dir mode
+NWN_MANAGER = None      # path to the nwn-manager wrapper (for init/unpack/wiki/repack)
+
+# Per-request context (ThreadingHTTPServer gives one thread per request).
+_req = threading.local()
+
+
+def _slug():
+    return getattr(_req, "slug", None)
+
+
+def _proxy():
+    return getattr(_req, "proxy", "")
+
+
+def purl(path=""):
+    """Absolute in-app URL for the current project (or plain, in single mode)."""
+    base = _proxy()
+    if _slug():
+        base += "/p/" + _slug()
+    return (base + path) or "/"
+
+
+def gurl(path=""):
+    """Absolute in-app URL at the console root (dashboard/jobs), proxy-aware."""
+    return (_proxy() + path) or "/"
+
 
 # --- JSON GFF plumbing -------------------------------------------------------
 
@@ -133,13 +176,20 @@ body{font-family:system-ui,sans-serif;margin:1.5em;background:#1e1f24;color:#d8d
 a{color:#7ab3ff} table{border-collapse:collapse;margin:1em 0}
 td,th{border:1px solid #444;padding:.25em .6em;text-align:left}
 th{background:#2a2b31} tr:nth-child(even){background:#25262c}
-input[type=text],input[type=number],select{background:#2a2b31;color:#d8d9de;
- border:1px solid #555;padding:.2em .4em}
+input[type=text],input[type=number],input[type=file],select{background:#2a2b31;
+ color:#d8d9de;border:1px solid #555;padding:.2em .4em}
 input[type=submit],button{background:#39507a;color:#fff;border:0;
  padding:.4em 1em;cursor:pointer;margin:.2em}
 .nav a{margin-right:1.2em} .note{color:#9a9;font-style:italic}
 .warn{color:#e6a23c} .err{color:#f66} .ok{color:#8c6}
 fieldset{border:1px solid #555;margin:.8em 0} legend{padding:0 .5em}
+.card{border:1px solid #444;background:#25262c;border-radius:6px;padding:.8em 1.1em;margin:.8em 0}
+.grid{display:flex;flex-wrap:wrap;gap:1em} .grid .card{flex:1 1 22em}
+.actions form{display:inline-block} .pill{font-size:.85em;padding:.1em .5em;
+ border-radius:1em;background:#2a2b31;margin-right:.4em}
+pre.log{background:#111318;color:#c6d0d9;padding:.8em;border-radius:6px;
+ max-height:24em;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.phase{font-weight:bold} h2{margin-top:1.4em}
 """
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
@@ -154,18 +204,44 @@ legend{padding:0 .5em;font-weight:bold}
 .note{opacity:.7;font-style:italic} .warn{color:#b8860b}
 .err{color:#c0392b} .ok{color:#2e8b57}
 .nav a{margin-right:1.2em}
+.card{border:1px solid #8886;border-radius:6px;padding:.8em 1.1em;margin:.8em 0}
+.grid{display:flex;flex-wrap:wrap;gap:1em} .grid .card{flex:1 1 22em}
+pre.log{background:#0003;padding:.8em;border-radius:6px;max-height:24em;
+ overflow:auto;white-space:pre-wrap;word-break:break-word}
 input[type=submit],button{padding:.35em 1em;cursor:pointer;margin:.2em}
 """
 
 
-def page(title, body):
-    # NAV_EXTRA links are external (wiki, map...) and use double quotes so
-    # the reverse-proxy prefix rewrite in _send (single-quote hrefs only)
-    # leaves them untouched.
+def _nav():
     extra = "".join('<a href="%s">%s</a>' % (esc(u), esc(l))
                     for l, u in NAV_EXTRA)
-    nav = ("<div class='nav'><a href='/'>Editor Home</a><a href='/areas'>Areas</a>"
-           "%s</div>" % extra)
+    proj = getattr(_req, "project", None)
+    links = []
+    if SINGLE_MODE:
+        links.append("<a href='%s'>Areas</a>" % purl("/areas"))
+        if proj and proj.creature_count():
+            links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+        if proj and proj.has_module():
+            links.append("<a href='%s'>Module</a>" % purl("/module"))
+    else:
+        links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
+        if _slug():
+            links.append("<a href='%s'>%s</a>" % (purl("/"), esc(_slug())))
+            links.append("<a href='%s'>Areas</a>" % purl("/areas"))
+            links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+            links.append("<a href='%s'>Module</a>" % purl("/module"))
+            if _has_wiki_current():
+                links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
+    return "<div class='nav'>%s%s</div>" % ("".join(links), extra)
+
+
+def _has_wiki_current():
+    proj = getattr(_req, "project", None)
+    return bool(proj and proj.has_wiki())
+
+
+def page(title, body, head_extra=""):
+    nav = _nav()
     if WIKI_SHELL:
         inner = ("<style>%s</style>%s<h1>%s</h1>%s"
                  % (SHELL_CSS, nav, esc(title), body))
@@ -173,14 +249,228 @@ def page(title, body):
                 .replace("{{TITLE}}", esc(title))
                 .replace("{{BODY}}", inner))
     return ("<!doctype html><html><head><meta charset='utf-8'><title>%s</title>"
-            "<style>%s</style></head><body>%s"
-            "<h1>%s</h1>%s</body></html>" % (esc(title), CSS, nav,
+            "%s<style>%s</style></head><body>%s"
+            "<h1>%s</h1>%s</body></html>" % (esc(title), head_extra, CSS, nav,
                                              esc(title), body))
 
 
 def hidden_resrefs(resrefs):
     return "".join("<input type='hidden' name='res' value='%s'>" % esc(r)
                    for r in resrefs)
+
+
+# --- Project model ----------------------------------------------------------
+
+def sanitize_slug(name):
+    return re.sub(r"[^a-z0-9_]+", "_", (name or "").lower()).strip("_")[:48]
+
+
+def safe_basename(name):
+    return os.path.basename((name or "").replace("\\", "/")).strip() or "file"
+
+
+class Project:
+    def __init__(self, root, unpacked=None, git_root=None, gic_root=None):
+        self.root = os.path.abspath(root)
+        self.slug = os.path.basename(self.root)
+        self.unpacked = (os.path.abspath(unpacked) if unpacked
+                         else os.path.join(self.root, "unpacked"))
+        self.git_root = os.path.abspath(git_root) if git_root else self.unpacked
+        self.gic_root = os.path.abspath(gic_root) if gic_root else self.unpacked
+
+    @property
+    def docs(self):
+        return os.path.join(self.root, "docs")
+
+    def has_unpacked(self):
+        return os.path.isdir(self.unpacked)
+
+    def has_wiki(self):
+        return os.path.isfile(os.path.join(self.docs, "index.html"))
+
+    def area_count(self):
+        if not self.has_unpacked():
+            return 0
+        return len(glob.glob(os.path.join(self.unpacked, "*.are.json")))
+
+    def creature_count(self):
+        if not self.has_unpacked():
+            return 0
+        return len(glob.glob(os.path.join(self.unpacked, "*.utc.json")))
+
+    def has_module(self):
+        return os.path.isfile(os.path.join(self.unpacked, "module.ifo.json"))
+
+    def built_mod_path(self):
+        cands = (glob.glob(os.path.join(self.root, "*.mod"))
+                 + glob.glob(os.path.join(self.root, "dist", "*.mod")))
+        return max(cands, key=os.path.getmtime) if cands else None
+
+    def source_mod(self):
+        p = os.path.join(self.root, ".nasher", "source")
+        if os.path.isfile(p):
+            try:
+                return open(p).read().strip()
+            except OSError:
+                return None
+        return None
+
+
+def is_project_dir(d):
+    return os.path.isdir(d) and (
+        os.path.isfile(os.path.join(d, "nasher.cfg"))
+        or os.path.isdir(os.path.join(d, "unpacked")))
+
+
+def find_project(slug):
+    slug = sanitize_slug(slug)
+    if not slug or SINGLE_MODE or not PROJECTS_DIR:
+        return None
+    d = os.path.join(PROJECTS_DIR, slug)
+    return Project(d) if is_project_dir(d) else None
+
+
+def list_projects():
+    if not PROJECTS_DIR or not os.path.isdir(PROJECTS_DIR):
+        return []
+    out = []
+    for name in sorted(os.listdir(PROJECTS_DIR)):
+        d = os.path.join(PROJECTS_DIR, name)
+        if is_project_dir(d):
+            out.append(Project(d))
+    return out
+
+
+# --- Background jobs ---------------------------------------------------------
+
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+
+
+class Job:
+    def __init__(self, title, argv, cwd=None, kind=None, slug=None,
+                 on_success=None):
+        self.id = uuid.uuid4().hex[:12]
+        self.title = title
+        self.argv = argv
+        self.cwd = cwd
+        self.kind = kind          # ingest | wiki | build
+        self.slug = slug
+        self.on_success = on_success
+        self.state = "running"    # running | ok | failed
+        self.phase = "starting"
+        self.lines = []
+        self.built = None
+        self.started = time.time()
+        self.ended = None
+
+    def add(self, line):
+        self.lines.append(line)
+        if len(self.lines) > 800:
+            del self.lines[:len(self.lines) - 800]
+
+
+def _parse_phase(job, line):
+    if re.match(r"^Packing ", line):
+        job.phase = "packing"
+    elif re.match(r"^Compiling ", line):
+        m = re.match(r"^Compiling (\d+)", line)
+        job.phase = "compiling %s scripts" % (m.group(1) if m else "?")
+    elif re.match(r"^Updating ", line) and job.phase in ("starting", "converting"):
+        job.phase = "converting"
+    elif line.startswith("[nwn-manager]"):
+        msg = line.split("]", 1)[1].strip()
+        if msg:
+            job.phase = msg[:100]
+    m = re.search(r"\[nwn-manager\] built: (.+)$", line)
+    if m:
+        job.built = m.group(1).strip()
+
+
+def _run_job(job):
+    try:
+        # Line-buffer the child's stdout when possible so phase lines show up
+        # live instead of all at once at process exit (the child block-buffers
+        # its pipe because stdout is not a TTY).
+        argv = job.argv
+        if shutil.which("stdbuf"):
+            argv = ["stdbuf", "-oL", "-eL"] + list(job.argv)
+        proc = subprocess.Popen(
+            argv, cwd=job.cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1, env=os.environ)
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            job.add(line)
+            _parse_phase(job, line)
+        proc.wait()
+        if proc.returncode != 0:
+            job.state = "failed"
+            job.phase = "failed (exit %d)" % proc.returncode
+            job.ended = time.time()
+            return
+        if job.on_success:
+            job.on_success(job)
+        job.state = "ok"
+        job.phase = "done"
+        job.ended = time.time()
+    except Exception as exc:  # noqa: BLE001 - surface any launch failure
+        job.add("ERROR: %s" % exc)
+        job.state = "failed"
+        job.phase = "error"
+        job.ended = time.time()
+
+
+def start_job(job):
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+    threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+    return job
+
+
+def get_job(jid):
+    with _JOBS_LOCK:
+        return _JOBS.get(jid)
+
+
+# --- Multipart parsing (stdlib only; `cgi` is gone in Python 3.13+) ---------
+
+def parse_multipart(headers, rfile):
+    """Return (fields, files): name -> [str] and name -> [(filename, bytes)]."""
+    ctype = headers.get("Content-Type", "")
+    fields, files = {}, {}
+    if "multipart/form-data" not in ctype:
+        return fields, files
+    m = re.search(r"boundary=([^;]+)", ctype)
+    if not m:
+        return fields, files
+    boundary = m.group(1).strip().strip('"')
+    length = int(headers.get("Content-Length", 0))
+    body = rfile.read(length)
+    delim = b"--" + boundary.encode()
+    for part in body.split(delim):
+        if part in (b"", b"--", b"--\r\n", b"\r\n"):
+            continue
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        if b"\r\n\r\n" not in part:
+            continue
+        raw_headers, _, data = part.partition(b"\r\n\r\n")
+        hlines = raw_headers.decode("utf-8", "replace").split("\r\n")
+        disp = next((h for h in hlines
+                     if h.lower().startswith("content-disposition")), "")
+        nm = re.search(r'name="([^"]*)"', disp)
+        if not nm:
+            continue
+        name = nm.group(1)
+        fn = re.search(r'filename="([^"]*)"', disp)
+        if fn is not None:
+            files.setdefault(name, []).append((fn.group(1), data))
+        else:
+            fields.setdefault(name, []).append(
+                data.decode("utf-8", "replace"))
+    return fields, files
 
 
 # --- Area logic -------------------------------------------------------------
@@ -239,7 +529,7 @@ def render_areas(root, query):
             "Tileset: <select name='tileset'>%s</select> "
             "<input type='submit' value='Apply filter'></form>" % (esc(q), opts))
     body = [filt,
-            "<form method='post' action='/areas/select'>",
+            "<form method='post' action='%s'>" % purl("/areas/select"),
             "<table><tr><th><input type='checkbox' "
             "onclick=\"document.querySelectorAll('input[name=res]')"
             ".forEach(c=>c.checked=this.checked)\"></th>"
@@ -272,13 +562,14 @@ def render_scripts_form(root, resrefs):
         (f, f, esc(", ".join(sorted({r["scripts"][f] or "(none)" for r in rows}))))
         for f in AREA_SCRIPT_FIELDS)
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
-            "<form method='post' action='/areas/scripts/apply'>%s"
+            "<form method='post' action='%s'>%s"
             "<table><tr><th>Event</th><th>New script resref</th>"
             "<th>Current value(s)</th></tr>%s</table>"
             "<p class='note'>Blank = leave unchanged. Enter <b>-</b> to clear "
             "a script. Max 16 chars, no extension.</p>"
             "<input type='submit' value='Apply to selected areas'></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), hidden_resrefs(resrefs), inputs))
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/apply"),
+             hidden_resrefs(resrefs), inputs))
     return page("Bulk edit area scripts", body)
 
 
@@ -320,7 +611,7 @@ def render_lighting_form(root, resrefs):
         (f, f, esc(getv(d0, f, "")), hint)
         for f, _t, hint in LIGHT_NUM_FIELDS)
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
-            "<form method='post' action='/areas/lighting/apply'>%s"
+            "<form method='post' action='%s'>%s"
             "<fieldset><legend>Colors (hex #rrggbb)</legend>"
             "<table><tr><th>Field</th><th>New value</th>"
             "<th>Current (%s)</th></tr>%s</table></fieldset>"
@@ -329,7 +620,8 @@ def render_lighting_form(root, resrefs):
             "<th>Hint</th></tr>%s</table></fieldset>"
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
             "<input type='submit' value='Apply to selected areas'></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), hidden_resrefs(resrefs),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/apply"),
+             hidden_resrefs(resrefs),
              esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows))
     return page("Bulk edit lighting & fog", body)
 
@@ -367,7 +659,7 @@ def render_tags_form(root, resrefs):
             "<td><input type='text' name='ref_%s' placeholder='(keep %s)'></td></tr>" %
             (esc(res), esc(loc_get(d, "Name")), esc(res),
              esc(getv(d, "Tag", "")), esc(res), esc(res)))
-    body = ("<form method='post' action='/areas/tags/apply'>%s"
+    body = ("<form method='post' action='%s'>%s"
             "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
             "<th>New ResRef (renames files!)</th></tr>%s</table>"
             "<p class='warn'>ResRef rename moves the .are.json/.git.json/"
@@ -375,7 +667,7 @@ def render_tags_form(root, resrefs):
             "NOT update door/trigger transitions in other areas that target "
             "the old resref - search those separately.</p>"
             "<input type='submit' value='Apply'></form>" %
-            (hidden_resrefs(resrefs), "".join(rows)))
+            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows)))
     return page("Edit area tags / resrefs", body)
 
 
@@ -419,39 +711,337 @@ def apply_tags(root, git_root, gic_root, form):
 
 def result_page(title, changed, selected, extra=""):
     body = ("<p class='ok'>Changed %d of %d selected: %s</p>%s"
-            "<p><a href='/areas'>Back to areas</a></p>" %
+            "<p><a href='%s'>Back to areas</a></p>" %
             (len(changed), len(selected),
-             esc(", ".join(changed) or "(nothing - all values blank/same)"), extra))
+             esc(", ".join(changed) or "(nothing - all values blank/same)"),
+             extra, purl("/areas")))
     return page(title, body)
+
+
+# --- Creature blueprints (.utc.json) ----------------------------------------
+# Ported from nwn_web_editor.py, JSON-native (reads unpacked/*.utc.json directly
+# instead of round-tripping binary .utc through nwn_gff).
+
+ABILITY_FIELDS = ["Str", "Dex", "Con", "Int", "Wis", "Cha"]
+STAT_FIELDS = [  # (field, type) - only rendered when present in the file
+    ("NaturalAC", "byte"), ("HitPoints", "short"), ("CurrentHitPoints", "short"),
+    ("MaxHitPoints", "short"), ("fortbonus", "short"), ("refbonus", "short"),
+    ("willbonus", "short"), ("ChallengeRating", "float"), ("WalkRate", "int"),
+]
+APPEAR_FIELDS = [  # only rendered when present (dynamic-appearance creatures)
+    ("Appearance_Type", "word"), ("PortraitId", "word"), ("Gender", "byte"),
+    ("Race", "byte"), ("Phenotype", "int"), ("Appearance_Head", "byte"),
+    ("Color_Hair", "byte"), ("Color_Skin", "byte"),
+    ("Color_Tattoo1", "byte"), ("Color_Tattoo2", "byte"),
+    ("Tail_New", "dword"), ("Wings_New", "dword"),
+]
+
+
+def utc_path(root, res):
+    return os.path.join(root, res + ".utc.json")
+
+
+def creature_resrefs(root):
+    return sorted(f[:-len(".utc.json")] for f in os.listdir(root)
+                  if f.endswith(".utc.json"))
+
+
+def creature_summary(d):
+    classes = ", ".join(
+        "%s lvl %s" % (getv(c, "Class", "?"), getv(c, "ClassLevel", "?"))
+        for c in getv(d, "ClassList", []))
+    return {
+        "first": loc_get(d, "FirstName"), "last": loc_get(d, "LastName"),
+        "tag": getv(d, "Tag", ""), "classes": classes,
+        "appearance": getv(d, "Appearance_Type", ""),
+    }
+
+
+def render_creatures(root, query):
+    q = (query.get("q", [""])[0]).lower()
+    body = ["<form method='get'>Filter: <input type='text' name='q' value='%s'>"
+            "<input type='submit' value='Apply'></form>" % esc(q),
+            "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
+            "<th>Classes</th><th>Appearance</th></tr>"]
+    count = 0
+    for res in creature_resrefs(root):
+        d = load_cached(utc_path(root, res))
+        s = creature_summary(d)
+        name = ("%s %s" % (s["first"], s["last"])).strip()
+        if q and q not in res.lower() and q not in name.lower() \
+                and q not in s["tag"].lower():
+            continue
+        count += 1
+        body.append("<tr><td><a href='%s'>%s</a></td>"
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                    (purl("/creature?res=" + urllib.parse.quote(res)), esc(res),
+                     esc(name), esc(s["tag"]), esc(s["classes"]),
+                     esc(s["appearance"])))
+    body.append("</table><p class='note'>%d creatures shown.</p>" % count)
+    return page("Creature blueprints (.utc)", "".join(body))
+
+
+def render_char_form(d, action, ident_html):
+    def num_input(f):
+        return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
+                "</td></tr>" % (f, f, esc(getv(d, f, ""))))
+
+    abil = "".join(num_input(f) for f in ABILITY_FIELDS)
+    stats = "".join(num_input(f) for f, _t in STAT_FIELDS if f in d)
+    appear = "".join(num_input(f) for f, _t in APPEAR_FIELDS if f in d)
+
+    feats = sorted(getv(f, "Feat", -1) for f in getv(d, "FeatList", []))
+    feat_boxes = "".join(
+        "<label style='display:inline-block;margin:.15em .5em'>"
+        "<input type='checkbox' name='delfeat' value='%d'> %d</label>" % (n, n)
+        for n in feats)
+
+    return (
+        "<form method='post' action='%s'>%s"
+        "<fieldset><legend>Identity</legend><table>"
+        "<tr><td>FirstName</td><td><input type='text' name='FirstName' value='%s'></td></tr>"
+        "<tr><td>LastName</td><td><input type='text' name='LastName' value='%s'></td></tr>"
+        "<tr><td>Tag</td><td><input type='text' name='Tag' value='%s'></td></tr>"
+        "</table></fieldset>"
+        "<fieldset><legend>Abilities</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Stats</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Appearance</legend><table>%s</table>"
+        "<p class='note'>Only fields present in this file are shown; static-"
+        "appearance creatures have no head/body-part fields. IDs come from "
+        "appearance.2da / portraits.2da etc.</p></fieldset>"
+        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s"
+        "<p>Add feat IDs (comma-separated): "
+        "<input type='text' name='addfeats' placeholder='e.g. 1,28,411'></p>"
+        "</fieldset>"
+        "<p class='note'>Blank numeric fields are left unchanged.</p>"
+        "<input type='submit' value='Save'></form>" %
+        (action, ident_html, esc(loc_get(d, "FirstName")),
+         esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
+         abil, stats, appear, len(feats),
+         feat_boxes or "<p class='note'>none</p>"))
+
+
+def apply_char_edits(d, form):
+    """Apply UTC form fields onto dict d. Returns True if changed."""
+    touched = False
+    for name in ("FirstName", "LastName"):
+        val = form.get(name, [None])[0]
+        if val is not None and val != loc_get(d, name):
+            loc_set(d, name, val)
+            touched = True
+    tag = form.get("Tag", [None])[0]
+    if tag is not None and tag != getv(d, "Tag"):
+        setv(d, "Tag", tag, "cexostring")
+        touched = True
+
+    numeric = [(f, "byte") for f in ABILITY_FIELDS] + STAT_FIELDS + APPEAR_FIELDS
+    for f, gff_type in numeric:
+        val = form.get(f, [""])[0].strip()
+        if not val:
+            continue
+        new = float(val) if gff_type == "float" else int(val)
+        if getv(d, f) != new:
+            setv(d, f, new, gff_type)
+            touched = True
+
+    delfeats = {int(x) for x in form.get("delfeat", [])}
+    addfeats = [int(x) for x in
+                re.split(r"[,\s]+", form.get("addfeats", [""])[0].strip()) if x]
+    if delfeats or addfeats:
+        fl = d.setdefault("FeatList", {"type": "list", "value": []})
+        entries = fl["value"]
+        have = {getv(e, "Feat") for e in entries}
+        entries[:] = [e for e in entries if getv(e, "Feat") not in delfeats]
+        sid = entries[0]["__struct_id"] if entries else 1
+        for n in addfeats:
+            if n not in have:
+                entries.append({"__struct_id": sid,
+                                "Feat": {"type": "word", "value": n}})
+        touched = True
+    return touched
+
+
+# --- Module info (module.ifo.json) ------------------------------------------
+
+def module_ifo_path(root):
+    return os.path.join(root, "module.ifo.json")
+
+
+def render_module_form(d):
+    return (
+        "<form method='post' action='%s'>"
+        "<fieldset><legend>Module Info</legend><table>"
+        "<tr><td>Module Name</td><td><input type='text' name='Mod_Name' "
+        "value='%s' size='60'></td></tr>"
+        "<tr><td>Description</td><td><textarea name='Mod_Description' "
+        "rows='10' cols='70'>%s</textarea></td></tr>"
+        "</table></fieldset>"
+        "<input type='submit' value='Save'></form>" %
+        (purl("/module/apply"),
+         esc(loc_get(d, "Mod_Name")), esc(loc_get(d, "Mod_Description"))))
+
+
+def apply_module(root, form):
+    path = module_ifo_path(root)
+    d = json_load(path)
+    touched = False
+    for name in ("Mod_Name", "Mod_Description"):
+        val = form.get(name, [None])[0]
+        if val is not None and val != loc_get(d, name):
+            loc_set(d, name, val)
+            touched = True
+    if touched:
+        json_save(path, d)
+        invalidate(path)
+    return touched
+
+
+# --- Dashboard / project home / jobs pages ----------------------------------
+
+def render_dashboard():
+    projs = list_projects()
+    cards = []
+    for p in projs:
+        pills = ["<span class='pill'>%d areas</span>" % p.area_count()]
+        if p.has_wiki():
+            pills.append("<span class='pill'>wiki</span>")
+        if p.built_mod_path():
+            pills.append("<span class='pill'>built</span>")
+        cards.append(
+            "<div class='card'><h3><a href='%s'>%s</a></h3>%s</div>" %
+            (gurl("/p/%s/" % p.slug), esc(p.slug), "".join(pills)))
+    listing = ("<div class='grid'>%s</div>" % "".join(cards) if cards else
+               "<p class='note'>No projects yet. Upload a .mod below to create one.</p>")
+    upload = (
+        "<div class='card'><h2>New project from a module</h2>"
+        "<form method='post' action='%s' enctype='multipart/form-data'>"
+        "<p>Project name (slug): <input type='text' name='slug' "
+        "placeholder='(defaults to the .mod filename)'></p>"
+        "<p>Module file (.mod): <input type='file' name='module' "
+        "accept='.mod,.erf' required></p>"
+        "<p>Extra files (optional, dropped into unpacked/): "
+        "<input type='file' name='extra' multiple></p>"
+        "<input type='submit' value='Upload &amp; ingest'></form>"
+        "<p class='note'>Ingest runs <code>nwn-manager init</code> and unpacks "
+        "the module into its own project subdirectory.</p></div>"
+        % gurl("/projects/new"))
+    prereq = ("<p class='note'>Requires <code>nasher</code>, <code>nwn_gff</code>, "
+              "<code>nwn_script_comp</code> and <code>python3</code> on PATH "
+              "(build/wiki jobs fail loudly otherwise).</p>")
+    return page("NWN module console",
+                "<h2>Projects</h2>%s%s%s" % (listing, upload, prereq))
+
+
+def render_project_home(proj):
+    n = proj.area_count()
+    src = proj.source_mod()
+    built = proj.built_mod_path()
+    rows = []
+    rows.append("<div class='card'><h3>Edit</h3>"
+                "<p><a href='%s'>Areas</a> - %d found - bulk-edit event "
+                "scripts, lighting/fog, tags/resrefs.</p>"
+                "<p><a href='%s'>Creatures</a> - %d blueprints - stats, "
+                "feats, appearance.</p>"
+                "<p><a href='%s'>Module info</a> - name &amp; description.</p></div>"
+                % (purl("/areas"), n, purl("/creatures"), proj.creature_count(),
+                   purl("/module")))
+
+    ingest = ("<form method='post' action='%s'>"
+              "<button type='submit'>Re-ingest from source .mod</button></form>"
+              % purl("/ingest"))
+    src_note = ("<p class='note'>Source: %s</p>" % esc(src) if src else
+                "<p class='warn'>No recorded source .mod (.nasher/source); "
+                "re-ingest unavailable.</p>")
+    rows.append("<div class='card'><h3>Ingest</h3><div class='actions'>%s</div>%s</div>"
+                % (ingest if src else "", src_note))
+
+    wiki_actions = ["<form method='post' action='%s'>"
+                    "<button type='submit'>Rebuild wiki</button></form>"
+                    % purl("/wiki")]
+    if proj.has_wiki():
+        wiki_actions.append("<a href='%s'>View wiki</a>" % purl("/wiki/"))
+    rows.append("<div class='card'><h3>Wiki</h3><div class='actions'>%s</div>"
+                "<p class='note'>Runs <code>nwn-manager wiki</code> "
+                "(~30s), served here at %s.</p></div>"
+                % (" ".join(wiki_actions), esc(purl("/wiki/"))))
+
+    build_actions = ["<form method='post' action='%s'>"
+                     "<button type='submit'>Build module</button></form>"
+                     % purl("/build")]
+    if built:
+        build_actions.append("<a href='%s'>Download %s.mod</a>"
+                             % (purl("/download"), esc(proj.slug)))
+    built_note = ("<p class='note'>Last build: %s</p>" % esc(os.path.basename(built))
+                  if built else
+                  "<p class='note'>Not built yet.</p>")
+    rows.append("<div class='card'><h3>Build &amp; download</h3>"
+                "<div class='actions'>%s</div>%s"
+                "<p class='note'>Runs <code>nwn-manager repack</code> "
+                "(compile + pack, may take minutes).</p></div>"
+                % (" ".join(build_actions), built_note))
+
+    return page("Project: %s" % proj.slug, "<div class='grid'>%s</div>" % "".join(rows))
+
+
+def render_job_page(job):
+    head = "<meta http-equiv='refresh' content='2'>" if job.state == "running" else ""
+    tail = "\n".join(job.lines[-50:])
+    if job.state == "running":
+        status = "<p class='phase'>Running: %s</p>" % esc(job.phase)
+    elif job.state == "ok":
+        status = "<p class='ok phase'>Completed: %s</p>" % esc(job.phase)
+    else:
+        status = "<p class='err phase'>Failed: %s</p>" % esc(job.phase)
+    links = []
+    if job.state == "ok" and job.slug:
+        if job.kind == "build":
+            links.append("<a href='%s'>Download .mod</a>"
+                         % gurl("/p/%s/download" % job.slug))
+        elif job.kind == "wiki":
+            links.append("<a href='%s'>View wiki</a>"
+                         % gurl("/p/%s/wiki/" % job.slug))
+        links.append("<a href='%s'>Open project</a>" % gurl("/p/%s/" % job.slug))
+    elif job.slug:
+        links.append("<a href='%s'>Back to project</a>" % gurl("/p/%s/" % job.slug))
+    links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
+    body = ("%s<p>%s</p><pre class='log'>%s</pre><p>%s</p>" %
+            (status, esc(job.title), esc(tail) or "(no output yet)",
+             " &nbsp; ".join(links)))
+    return page("Job: %s" % job.title, body, head_extra=head)
 
 
 # --- HTTP handler -----------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    root = None       # dir of <resref>.are.json
-    git_root = None   # dir of <resref>.git.json (defaults to root)
-    gic_root = None   # dir of <resref>.gic.json (defaults to root)
-    url_prefix = ""   # e.g. "/tfn-qedit" when reverse-proxied under a subpath
+    url_prefix = ""   # e.g. "/qedit" when reverse-proxied under a subpath
 
-    def _path(self):
-        """Request path with any reverse-proxy prefix stripped."""
-        path = urllib.parse.urlparse(self.path).path
+    def _strip_proxy(self, path):
         if self.url_prefix and path.startswith(self.url_prefix):
-            path = path[len(self.url_prefix):] or "/"
+            return path[len(self.url_prefix):] or "/"
         return path
 
     def _send(self, content, code=200):
-        if self.url_prefix:
-            # every internal URL in the app is a single-quoted absolute path
-            content = (content
-                       .replace("href='/", "href='" + self.url_prefix + "/")
-                       .replace("action='/", "action='" + self.url_prefix + "/"))
         data = content.encode()
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_bytes(self, data, ctype, code=200, extra_headers=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _redirect(self, url):
+        self.send_response(303)
+        self.send_header("Location", url)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _form(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -461,108 +1051,363 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # quieter default log
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
+    @staticmethod
+    def _split_project(path):
+        # "/p/<slug>/rest" -> (slug, "/rest")
+        rest = path[len("/p/"):]
+        slug, sep, tail = rest.partition("/")
+        return slug, ("/" + tail if sep else "/")
+
+    # -- GET ----------------------------------------------------------------
     def do_GET(self):
-        url = urllib.parse.urlparse(self.path)
-        query = urllib.parse.parse_qs(url.query)
-        path = self._path()
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        raw = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(raw.query)
+        path = self._strip_proxy(raw.path)
         try:
+            if SINGLE_MODE:
+                _req.project = SINGLE_PROJECT
+                self._project_get(SINGLE_PROJECT, path, query)
+                return
             if path == "/":
-                n_are = len(area_resrefs(self.root))
-                self._send(page("NWN area editor",
-                    "<ul><li><a href='/areas'>Areas</a> - %d found - bulk-edit "
-                    "event scripts, lighting/fog, tags/resrefs</li></ul>"
-                    "<p class='note'>Data dir: %s. Every modified file gets a "
-                    "one-time .bak sibling backup.</p>"
-                    % (n_are, esc(self.root))))
-            elif path == "/areas":
-                self._send(render_areas(self.root, query))
-            elif path == "/areas/edit":
-                # Direct-link entry point (used by the generated area map):
-                # /areas/edit?res=X[&res=Y...]&action=scripts|lighting|tags
-                resrefs = [r for r in query.get("res", [])
-                           if os.path.exists(are_path(self.root, r))]
-                action = query.get("action", ["scripts"])[0]
-                if not resrefs:
-                    self._send(page("Unknown area",
-                                    "<p class='err'>No such area here.</p>"
-                                    "<p><a href='/areas'>Area list</a></p>"), 404)
+                self._send(render_dashboard())
+            elif path.startswith("/jobs/"):
+                job = get_job(path[len("/jobs/"):])
+                if not job:
+                    self._send(page("Unknown job", "<p class='err'>No such job.</p>"
+                                    "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 404)
+                else:
+                    self._send(render_job_page(job))
+            elif path.startswith("/p/"):
+                slug, sub = self._split_project(path)
+                proj = find_project(slug)
+                if not proj:
+                    self._send(page("Unknown project",
+                                    "<p class='err'>No such project.</p>"
+                                    "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 404)
                     return
-                render = {"scripts": render_scripts_form,
-                          "lighting": render_lighting_form,
-                          "tags": render_tags_form}.get(action, render_scripts_form)
-                self._send(render(self.root, resrefs))
+                _req.slug = proj.slug
+                _req.project = proj
+                self._project_get(proj, sub, query)
             else:
                 self._send(page("Not found", "<p>No such page.</p>"), 404)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
-    def do_POST(self):
-        form = self._form()
-        path = self._path()
-        try:
-            if path == "/areas/select":
-                resrefs = form.get("res", [])
-                action = form.get("action", [""])[0]
-                if not resrefs:
-                    self._send(page("No areas selected",
-                                    "<p><a href='/areas'>Back</a></p>"))
-                    return
-                render = {"scripts": render_scripts_form,
-                          "lighting": render_lighting_form,
-                          "tags": render_tags_form}[action]
-                self._send(render(self.root, resrefs))
-            elif path == "/areas/scripts/apply":
-                self._send(apply_scripts(self.root, form))
-            elif path == "/areas/lighting/apply":
-                self._send(apply_lighting(self.root, form))
-            elif path == "/areas/tags/apply":
-                self._send(apply_tags(self.root, self.git_root, self.gic_root, form))
+    def _project_get(self, proj, sub, query):
+        root = proj.unpacked
+        if sub == "/":
+            if SINGLE_MODE:
+                self._send(page("NWN area editor",
+                    "<ul><li><a href='%s'>Areas</a> - %d found - bulk-edit "
+                    "event scripts, lighting/fog, tags/resrefs</li></ul>"
+                    "<p class='note'>Data dir: %s.</p>"
+                    % (purl("/areas"), proj.area_count(), esc(root))))
             else:
-                self._send(page("Not found", "<p>No such action.</p>"), 404)
-        except Exception as e:
+                self._send(render_project_home(proj))
+        elif sub == "/areas":
+            self._send(render_areas(root, query))
+        elif sub == "/areas/edit":
+            resrefs = [r for r in query.get("res", [])
+                       if os.path.exists(are_path(root, r))]
+            action = query.get("action", ["scripts"])[0]
+            if not resrefs:
+                self._send(page("Unknown area",
+                                "<p class='err'>No such area here.</p>"
+                                "<p><a href='%s'>Area list</a></p>" % purl("/areas")), 404)
+                return
+            render = {"scripts": render_scripts_form,
+                      "lighting": render_lighting_form,
+                      "tags": render_tags_form}.get(action, render_scripts_form)
+            self._send(render(root, resrefs))
+        elif sub == "/creatures":
+            self._send(render_creatures(root, query))
+        elif sub == "/creature":
+            res = query.get("res", [""])[0]
+            cpath = utc_path(root, res)
+            if not os.path.isfile(cpath):
+                self._send(page("Unknown creature",
+                                "<p class='err'>No such creature.</p>"
+                                "<p><a href='%s'>Creatures</a></p>"
+                                % purl("/creatures")), 404)
+                return
+            d = load_cached(cpath)
+            ident = "<input type='hidden' name='res' value='%s'>" % esc(res)
+            self._send(page("Creature: " + res,
+                            render_char_form(d, purl("/creature/apply"), ident)))
+        elif sub == "/module":
+            if not os.path.isfile(module_ifo_path(root)):
+                self._send(page("No module.ifo",
+                                "<p class='err'>No module.ifo.json here.</p>"), 404)
+                return
+            d = load_cached(module_ifo_path(root))
+            self._send(page("Module Info", render_module_form(d)))
+        elif sub == "/download":
+            self._serve_download(proj)
+        elif sub == "/wiki" or sub.startswith("/wiki/"):
+            rel = sub[len("/wiki"):].lstrip("/")
+            self._serve_static(proj.docs, rel)
+        else:
+            self._send(page("Not found", "<p>No such page.</p>"), 404)
+
+    # -- POST ---------------------------------------------------------------
+    def do_POST(self):
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        raw = urllib.parse.urlparse(self.path)
+        path = self._strip_proxy(raw.path)
+        try:
+            if not SINGLE_MODE and path == "/projects/new":
+                self._create_project()
+                return
+            if SINGLE_MODE:
+                _req.project = SINGLE_PROJECT
+                self._project_post(SINGLE_PROJECT, path, self._form())
+                return
+            if path.startswith("/p/"):
+                slug, sub = self._split_project(path)
+                proj = find_project(slug)
+                if not proj:
+                    self._send(page("Unknown project",
+                                    "<p class='err'>No such project.</p>"), 404)
+                    return
+                _req.slug = proj.slug
+                _req.project = proj
+                self._project_post(proj, sub, None)
+                return
+            self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except Exception as e:  # noqa: BLE001
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
+
+    def _project_post(self, proj, sub, form):
+        # Lifecycle actions take no form body; area edits are urlencoded.
+        if sub in ("/ingest", "/wiki", "/build"):
+            self._project_action(proj, sub)
+            return
+        if form is None:
+            form = self._form()
+        root = proj.unpacked
+        if sub == "/areas/select":
+            resrefs = form.get("res", [])
+            action = form.get("action", [""])[0]
+            if not resrefs:
+                self._send(page("No areas selected",
+                                "<p><a href='%s'>Back</a></p>" % purl("/areas")))
+                return
+            render = {"scripts": render_scripts_form,
+                      "lighting": render_lighting_form,
+                      "tags": render_tags_form}[action]
+            self._send(render(root, resrefs))
+        elif sub == "/areas/scripts/apply":
+            self._send(apply_scripts(root, form))
+        elif sub == "/areas/lighting/apply":
+            self._send(apply_lighting(root, form))
+        elif sub == "/areas/tags/apply":
+            self._send(apply_tags(root, proj.git_root, proj.gic_root, form))
+        elif sub == "/creature/apply":
+            res = form.get("res", [""])[0]
+            cpath = utc_path(root, res)
+            d = json_load(cpath)
+            if apply_char_edits(d, form):
+                json_save(cpath, d)
+                invalidate(cpath)
+            self._send(page("Saved", "<p class='ok'>%s saved.</p>"
+                            "<p><a href='%s'>Back</a></p>" %
+                            (esc(res), purl("/creature?res="
+                                            + urllib.parse.quote(res)))))
+        elif sub == "/module/apply":
+            touched = apply_module(root, form)
+            msg = "Module info saved." if touched else "No changes."
+            self._send(page("Saved", "<p class='ok'>%s</p>"
+                            "<p><a href='%s'>Back</a></p>"
+                            % (esc(msg), purl("/module"))))
+        else:
+            self._send(page("Not found", "<p>No such action.</p>"), 404)
+
+    def _project_action(self, proj, sub):
+        if sub == "/ingest":
+            job = Job("Re-ingest %s" % proj.slug,
+                      [NWN_MANAGER, "unpack"], cwd=proj.root,
+                      kind="ingest", slug=proj.slug)
+            job.phase = "unpacking module"
+        elif sub == "/wiki":
+            job = Job("Wiki %s" % proj.slug,
+                      [NWN_MANAGER, "wiki"], cwd=proj.root,
+                      kind="wiki", slug=proj.slug)
+            job.phase = "generating wiki"
+        else:  # /build
+            job = Job("Build %s" % proj.slug,
+                      [NWN_MANAGER, "repack"], cwd=proj.root,
+                      kind="build", slug=proj.slug)
+            job.phase = "starting build"
+        start_job(job)
+        self._redirect(gurl("/jobs/" + job.id))
+
+    def _create_project(self):
+        fields, files = parse_multipart(self.headers, self.rfile)
+        mod_list = files.get("module", [])
+        if not mod_list or not mod_list[0][1]:
+            self._send(page("Upload error",
+                            "<p class='err'>No module file uploaded.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 400)
+            return
+        mod_filename, mod_bytes = mod_list[0]
+        want = fields.get("slug", [""])[0].strip()
+        slug = sanitize_slug(want or os.path.splitext(safe_basename(mod_filename))[0])
+        if not slug:
+            self._send(page("Upload error",
+                            "<p class='err'>Could not derive a project name.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 400)
+            return
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
+        if os.path.exists(proj_dir):
+            self._send(page("Upload error",
+                            "<p class='err'>Project %r already exists.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % (slug, gurl("/"))), 409)
+            return
+        # Stage the uploaded .mod persistently (not in /tmp): `nwn-manager init`
+        # records this path as .nasher/source, which "Re-ingest from source"
+        # later re-reads - so it must outlive the ingest job.
+        uploads = os.path.join(PROJECTS_DIR, ".uploads")
+        os.makedirs(uploads, exist_ok=True)
+        mod_path = os.path.join(uploads, slug + ".mod")
+        with open(mod_path, "wb") as fh:
+            fh.write(mod_bytes)
+        stage = tempfile.mkdtemp(prefix="qnwn_up_")
+        extras = []  # (basename, staged_path)
+        for fn, data in files.get("extra", []):
+            if not fn or not data:
+                continue
+            bn = safe_basename(fn)
+            sp = os.path.join(stage, "extra_" + bn)
+            with open(sp, "wb") as fh:
+                fh.write(data)
+            extras.append((bn, sp))
+
+        def on_success(job):
+            unpacked = os.path.join(proj_dir, "unpacked")
+            for bn, sp in extras:
+                try:
+                    shutil.copy(sp, os.path.join(unpacked, bn))
+                    job.add("[console] copied extra file %s -> unpacked/" % bn)
+                except OSError as exc:
+                    job.add("[console] WARN could not copy %s: %s" % (bn, exc))
+            shutil.rmtree(stage, ignore_errors=True)
+
+        job = Job("Ingest %s" % slug,
+                  [NWN_MANAGER, "init", proj_dir, mod_path],
+                  cwd=PROJECTS_DIR, kind="ingest", slug=slug,
+                  on_success=on_success)
+        start_job(job)
+        self._redirect(gurl("/jobs/" + job.id))
+
+    # -- static/download helpers -------------------------------------------
+    def _serve_static(self, docroot, rel):
+        if not os.path.isdir(docroot):
+            self._send(page("No wiki",
+                            "<p class='err'>No wiki generated yet.</p>"
+                            "<p><a href='%s'>Rebuild it</a></p>" % purl("/")), 404)
+            return
+        rel = rel or "index.html"
+        docroot_real = os.path.realpath(docroot)
+        full = os.path.realpath(os.path.join(docroot, rel))
+        if full != docroot_real and not full.startswith(docroot_real + os.sep):
+            self._send(page("Forbidden", "<p class='err'>Path escape.</p>"), 403)
+            return
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        if not os.path.isfile(full):
+            self._send(page("Not found", "<p class='err'>No such wiki file.</p>"), 404)
+            return
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        with open(full, "rb") as fh:
+            self._send_bytes(fh.read(), ctype)
+
+    def _serve_download(self, proj):
+        mod = proj.built_mod_path()
+        if not mod or not os.path.isfile(mod):
+            self._send(page("Not built",
+                            "<p class='err'>No built .mod yet - build first.</p>"
+                            "<p><a href='%s'>Back</a></p>" % purl("/")), 404)
+            return
+        with open(mod, "rb") as fh:
+            self._send_bytes(
+                fh.read(), "application/octet-stream",
+                extra_headers={"Content-Disposition":
+                               'attachment; filename="%s.mod"' % proj.slug})
+
+
+def _find_nwn_manager(explicit):
+    candidates = [explicit] if explicit else []
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "nwn-manager"))
+    found = shutil.which("nwn-manager")
+    if found:
+        candidates.append(found)
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return candidates[0]  # best guess; jobs will surface the error if wrong
 
 
 def main():
+    global PROJECTS_DIR, SINGLE_MODE, SINGLE_PROJECT, NWN_MANAGER
+    global WIKI_SHELL, WIKI_BASE
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--dir", default=".",
-                    help="directory of <resref>.are.json (default: cwd)")
+    ap.add_argument("--projects-dir", default=None,
+                    help="root dir holding one subdirectory per project "
+                         "(multi-project console mode)")
+    ap.add_argument("--dir", default=None,
+                    help="legacy single-project mode: a directory of "
+                         "<resref>.are.json (the console dashboard is disabled)")
     ap.add_argument("--git-dir", default=None,
-                    help="directory of <resref>.git.json (default: --dir)")
+                    help="(single-dir mode) dir of <resref>.git.json")
     ap.add_argument("--gic-dir", default=None,
-                    help="directory of <resref>.gic.json (default: --dir)")
+                    help="(single-dir mode) dir of <resref>.gic.json")
     ap.add_argument("--port", type=int, default=8341)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--url-prefix", default="",
                     help="serve under this path prefix (e.g. /qedit) when "
                          "behind a reverse proxy")
     ap.add_argument("--nav", action="append", default=[], metavar="LABEL=URL",
-                    help="extra nav-bar link (repeatable), e.g. "
-                         "--nav 'Wiki=/tfn-wiki/'")
+                    help="extra nav-bar link (repeatable), e.g. --nav 'Wiki=/tfn-wiki/'")
     ap.add_argument("--wiki-shell", default=None, metavar="FILE",
                     help="path to an nwn-wiki assets/embed-shell.html; wraps "
-                         "every editor page in the wiki's header/nav/styles")
+                         "every page in the wiki's header/nav/styles")
     ap.add_argument("--wiki-base", default="", metavar="URL",
-                    help="public base URL of that wiki (e.g. /tfn-wiki), "
-                         "substituted for the shell's {{ROOT}} asset paths")
+                    help="public base URL of that wiki, substituted for the "
+                         "shell's {{ROOT}} asset paths")
+    ap.add_argument("--nwn-manager", default=None,
+                    help="path to the nwn-manager wrapper (default: sibling in bin/)")
     args = ap.parse_args()
 
-    Handler.root = os.path.abspath(args.dir)
-    Handler.git_root = os.path.abspath(args.git_dir) if args.git_dir else Handler.root
-    Handler.gic_root = os.path.abspath(args.gic_dir) if args.gic_dir else Handler.root
+    NWN_MANAGER = _find_nwn_manager(args.nwn_manager)
     Handler.url_prefix = args.url_prefix.rstrip("/")
     NAV_EXTRA[:] = [(label, url) for label, _, url in
                     (n.partition("=") for n in args.nav) if url]
     if args.wiki_shell:
-        global WIKI_SHELL, WIKI_BASE
         with open(args.wiki_shell) as fh:
             WIKI_SHELL = fh.read()
         WIKI_BASE = args.wiki_base.rstrip("/")
 
+    if args.dir and not args.projects_dir:
+        SINGLE_MODE = True
+        d = os.path.abspath(args.dir)
+        SINGLE_PROJECT = Project(os.path.dirname(d) or d, unpacked=d,
+                                 git_root=args.git_dir, gic_root=args.gic_dir)
+        print("single-project dir: %s" % d)
+    else:
+        if not args.projects_dir:
+            ap.error("one of --projects-dir (console) or --dir (single) is required")
+        PROJECTS_DIR = os.path.abspath(args.projects_dir)
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+        print("projects dir: %s" % PROJECTS_DIR)
+
+    print("nwn-manager: %s" % NWN_MANAGER)
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print("area dir: %s" % Handler.root)
-    print("git dir:  %s" % Handler.git_root)
-    print("gic dir:  %s" % Handler.gic_root)
     print("Serving on http://%s:%d/ (Ctrl-C to stop)" % (args.host, args.port))
     srv.serve_forever()
 

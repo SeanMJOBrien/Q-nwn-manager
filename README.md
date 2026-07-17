@@ -274,6 +274,42 @@ DelayCommand(5.0, ExecuteScript("nwnmgr_bstamp", oPC));
 `OBJECT_SELF` inside the stamp is the object you pass to `ExecuteScript`, so pass
 the entering player (`GetEnteringObject()` / the PC) and they receive the message.
 
+### Web console (all-in-one UI)
+
+```sh
+nwn-manager console                         # → http://127.0.0.1:8341/
+nwn-manager console --projects-dir ~/mods   # manage projects under a chosen dir
+nwn-manager console --port 8080 --url-prefix /qedit   # behind a reverse proxy
+```
+
+A local, stdlib-only web console that ties the whole lifecycle together and
+manages **multiple projects** at once. Each project lives in its own
+subdirectory under `--projects-dir` (default: `<repo>/projects`). From the
+home page you can:
+
+- **Upload a `.mod`** (plus optional loose files) — it is ingested into a new
+  project via `nwn-manager init` (unpacked into `unpacked/`). Extra files are
+  dropped into `unpacked/`. The upload is kept under `.uploads/` so
+  *Re-ingest from source* (`nwn-manager unpack`) keeps working.
+- **Rebuild the wiki** per project (`nwn-manager wiki`) and view it in place at
+  `/p/<slug>/wiki/` — no external web server needed.
+- **Build & download** the packed `.mod` (`nwn-manager repack`), then download
+  it from `/p/<slug>/download`.
+- **Bulk-edit areas** (event scripts, lighting/fog, tags/resrefs), **creatures**
+  (abilities, stats, feats, appearance) and **module info** — all JSON-native,
+  editing `unpacked/*.are.json` / `*.utc.json` / `module.ifo.json` directly
+  (every first edit writes a one-time `.bak` sibling).
+
+Long operations (build ~minutes, wiki ~30s, ingest) run as background jobs with
+a live-progress page (`/jobs/<id>`). Binds `127.0.0.1` only; put it behind a
+reverse proxy (with `--url-prefix`) if you need to expose it.
+
+> The older `nwn-manager edit-areas` (single-project areas-only editor,
+> `nwn-area-editor --dir`) still works unchanged for scripted/one-off use and
+> reverse-proxied per-project deployments. For editing player `.bic` character
+> files (binary GFF, outside a project's `unpacked/`), use the standalone
+> `skills/nwn-web-editor/scripts/nwn_web_editor.py`.
+
 ### Generate the wiki
 
 ```sh

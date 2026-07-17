@@ -37,6 +37,15 @@ Usage:
                           docs/ is the folder GitHub Pages publishes
                           from. Extra args pass through to nwn-wiki.
 
+  $PROG console [--projects-dir <dir>] [args...]
+                          Serve the multi-project web console: a home page to
+                          upload/ingest a .mod into a new project, rebuild its
+                          wiki, build & download the packed .mod, and bulk-edit
+                          areas. Each project lives in its own subdirectory
+                          under --projects-dir (default: <repo>/projects).
+                          Extra args pass through to the console (--port,
+                          --host, --url-prefix, --wiki-shell, --wiki-base, --nav).
+
   $PROG edit-areas [--dir <dir>] [args...]
                           Serve a local web UI for bulk-editing area event
                           scripts, lighting/fog, and tags/resrefs directly
@@ -676,6 +685,27 @@ cmd_wiki() {
   exec "$SCRIPT_DIR/nwn-wiki" --src unpacked --out "$out" "${tlk_args[@]}" "$@"
 }
 
+cmd_console() {
+  # Multi-project console. Unlike edit-areas, it is NOT scoped to the current
+  # project - it manages every project under --projects-dir. Default projects
+  # dir is a sibling of the repo (SCRIPT_DIR/../projects).
+  local projects_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --projects-dir)
+        [[ -n ${2:-} ]] || { echo "error: --projects-dir requires a directory" >&2; exit 2; }
+        projects_dir=$2; shift 2
+        ;;
+      *) break ;;
+    esac
+  done
+  if [[ -z $projects_dir ]]; then
+    projects_dir=$(cd "$SCRIPT_DIR/.." && pwd)/projects
+  fi
+  mkdir -p "$projects_dir"
+  exec "$SCRIPT_DIR/nwn-area-editor" --projects-dir "$projects_dir" "$@"
+}
+
 cmd_edit_areas() {
   local root
   root=$(find_project_root) || {
@@ -854,6 +884,10 @@ main() {
     wiki)
       shift; preflight python3
       cmd_wiki "$@"
+      ;;
+    console)
+      shift; preflight python3
+      cmd_console "$@"
       ;;
     edit-areas)
       shift; preflight python3
