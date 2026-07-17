@@ -62,14 +62,21 @@ A Nim toolchain plus two Nim packages must be on `PATH`:
 - `nwn_gff`, `nwn_script_comp` (from the `neverwinter` package)
 - `python3` (for `nwn-manager wiki` and `nwn-manager console`)
 
-> **Bundled tools / no install:** if a shared `nwn-tools/` sibling directory
-> exists next to the repo (`<parent>/nwn-tools/<platform>/{nasher,neverwinter,nwnsc}`,
-> where `<platform>` is `linux`, `macos_arm64`, or `win`), `nwn-manager` adds it
-> to `PATH` automatically — so `nasher`/`nwn_gff`/`nwn_erf`/`nwnsc` are found
-> without a separate `nimble install`. Ingesting a module (`init`/`unpack`) only
-> needs `nasher` + `nwn_gff`; the script compiler is required only for
-> **building** (`repack`). On macOS the bundle ships `nwnsc` (not
-> `nwn_script_comp`), so building may need `nwnsc` — see below.
+> **Bundled tools — usually no install needed.** This repo ships the core
+> binaries in [`nwn-tools/`](nwn-tools/) for `linux`, `macos_arm64`, and `win`
+> (`nasher`, `nwn_gff`, `nwn_erf`, plus `nwn_script_comp`/`nwnsc`), and
+> `nwn-manager` adds the right one to `PATH` automatically. So a fresh clone can
+> ingest/build without any `nimble install`. Resolution order:
+> `$NWN_TOOLS_DIR` → the in-repo `nwn-tools/` → a shared `nwn-tools/` sibling of
+> the repo → `~/.nimble/bin`. Ingesting (`init`/`unpack`) needs only
+> `nasher` + `nwn_gff`; the compiler is required only for **building**
+> (`repack`) — on macOS/Windows that's `nwnsc` (the bundle has no
+> `nwn_script_comp` there). The bundled tools are a curated subset; the full
+> tool suite (extra `neverwinter` utilities) still lives in the shared
+> `nwn-tools/` sibling.
+>
+> On macOS, binaries from a `git clone` are **not** Gatekeeper-quarantined, so
+> they run from the terminal without prompts.
 
 ### Install on an immutable Fedora distro (Bazzite, Silverblue, etc.)
 

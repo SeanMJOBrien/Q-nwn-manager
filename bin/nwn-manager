@@ -21,19 +21,24 @@ case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) _plat=win ;;
   *)      _plat="" ;;
 esac
-_tools_root="${NWN_TOOLS_DIR:-$(cd "$SCRIPT_DIR/../.." 2>/dev/null && pwd)/nwn-tools}"
-if [[ -n ${_plat:-} && -d "$_tools_root/$_plat" ]]; then
-  for _d in nasher neverwinter nwnsc sqlite; do
-    [[ -d "$_tools_root/$_plat/$_d" ]] && PATH="$PATH:$_tools_root/$_plat/$_d"
+# Check, in order: an explicit $NWN_TOOLS_DIR, the tools bundled IN this repo
+# (bin/../nwn-tools), then a shared nwn-tools sibling of the repo. win uses
+# a "neverwinter64" subdir; the others use "neverwinter".
+if [[ -n ${_plat:-} ]]; then
+  for _root in "${NWN_TOOLS_DIR:-}" "$SCRIPT_DIR/../nwn-tools" "$SCRIPT_DIR/../../nwn-tools"; do
+    [[ -n $_root && -d "$_root/$_plat" ]] || continue
+    for _d in nasher neverwinter neverwinter64 nwnsc sqlite; do
+      [[ -d "$_root/$_plat/$_d" ]] && PATH="$PATH:$_root/$_plat/$_d"
+    done
   done
 fi
 # $NWN_TOOLS_DIR may also point straight at a flat directory of binaries.
-[[ -n ${NWN_TOOLS_DIR:-} && -d "$NWN_TOOLS_DIR" ]] && PATH="$PATH:$NWN_TOOLS_DIR"
+[[ -n ${NWN_TOOLS_DIR:-} && -d "${NWN_TOOLS_DIR:-}" ]] && PATH="$PATH:$NWN_TOOLS_DIR"
 for _d in "$HOME/.nimble/bin" "$HOME/.local/bin"; do
   [[ -d "$_d" ]] && PATH="$PATH:$_d"
 done
 export PATH
-unset _tools_root _plat _d 2>/dev/null || true
+unset _root _plat _d 2>/dev/null || true
 
 usage() {
   cat <<EOF
