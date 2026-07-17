@@ -79,6 +79,21 @@ def main() -> int:
              "Defaults to activity-sessions.json inside the first --log-dir.",
     )
     ap.add_argument(
+        "--db-dir", default=None, dest="db_dir", metavar="DIR",
+        help="Path to the campaign database directory containing bestiarydb.sqlite3. "
+             "When provided, the Server Firsts page is also refreshed alongside "
+             "activity.html and existing server-first records are back-filled with "
+             "player names derived from the log sessions.",
+    )
+    ap.add_argument(
+        "--online-since", type=int, default=None, dest="online_since", metavar="EPOCH",
+        help="Unix timestamp floor for 'currently online' detection. Sessions still "
+             "open in the logs that began before this time are treated as stale "
+             "leftovers from a previous server run (killed without a clean leave) "
+             "and are not reported as online. Set by 'nwn-manager serve' to its own "
+             "start time, since the server is (re)started alongside the monitor.",
+    )
+    ap.add_argument(
         "--check-online", action="store_true",
         help="Exit 0 if at least one player is currently online, 1 if not. "
              "No output files are written.",
@@ -104,7 +119,14 @@ def main() -> int:
         else log_dir_paths[0] / "activity-sessions.json"
     )
 
-    activity = wiki.parse_nwserver_logs(log_dir_paths, cache_path=cache_path)
+    online_floor = (
+        datetime.fromtimestamp(args.online_since)
+        if args.online_since is not None
+        else None
+    )
+    activity = wiki.parse_nwserver_logs(
+        log_dir_paths, cache_path=cache_path, online_floor=online_floor
+    )
 
     if args.check_online:
         online = any(
@@ -138,9 +160,17 @@ def main() -> int:
     wiki._GENERATED_AT = datetime.now().strftime("%b %-d, %Y %H:%M")
     wiki._MANUAL_PAGES = []
     wiki.load_wiki_theme(src.parent, out)
+
+    if args.db_dir:
+        db_dir = Path(args.db_dir).resolve()
+        wiki.backfill_server_first_player_names(db_dir, activity["sessions"])
+        wiki.load_bestiary_stats(db_dir)
+
     # Populate _MANUAL_PAGES so the Documents nav dropdown matches the rest of
     # the wiki. render_manual_pages is idempotent; re-writing existing pages is
     # harmless, and the call is skipped entirely when docs.manual/ is absent.
+    # When --db-dir was provided and _BESTIARY_ACTIVE is True, this also
+    # regenerates ServerFirsts.html with up-to-date data.
     wiki.render_manual_pages(src.parent, out)
 
     wiki.render_activity_page(activity, out, tz_label=wiki._tz_label_from_env())

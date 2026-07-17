@@ -412,6 +412,38 @@ svg .convo-node text {
   margin: 0.5em 0 1em;
   font-size: 0.95em;
 }
+.warn-damage-gate {
+  background: #fff6e8;
+  border-left: 4px solid #cc6600;
+  color: #6b3a00;
+  padding: 0.6em 0.9em;
+  margin: 0.5em 0 1em;
+  font-size: 0.95em;
+}
+.note-retaliation {
+  background: #eef4fb;
+  border-left: 4px solid #3a6ea5;
+  color: #1d3a5c;
+  padding: 0.6em 0.9em;
+  margin: 0.5em 0 1em;
+  font-size: 0.95em;
+}
+
+/* Duplicate destination tag warnings */
+.warn-dup-tag {
+  color: #b54708;
+  font-size: 0.85em;
+  margin-left: 0.5em;
+  cursor: help;
+}
+.warn-dup-tag-note {
+  background: #fff8ed;
+  border-left: 3px solid #cc6600;
+  color: #7a3c00;
+  padding: 0.5em 0.75em;
+  margin: 0.5em 0 1em;
+  font-size: 0.9em;
+}
 .note-pickpocket {
   background: #f0fff4;
   border-left: 4px solid #2e8b57;
@@ -420,6 +452,15 @@ svg .convo-node text {
   margin: 0.5em 0 1em;
   font-size: 0.95em;
 }
+p.note {
+  background: var(--card);
+  border-left: 4px solid var(--accent);
+  color: var(--muted);
+  padding: 0.6em 0.9em;
+  margin: 0.5em 0 1em;
+  font-size: 0.92em;
+}
+p.note strong, p.note em { color: var(--fg); }
 .reason-missing     { color: #888; font-size: 0.9em; }
 .reason-undroppable { color: #b07820; font-size: 0.9em; font-style: italic; }
 .badge-no-drop {
@@ -568,6 +609,11 @@ svg .convo-node text {
 .items-content { flex: 1; min-width: 0; }
 /* Keep anchored rows from hiding under the sticky site header */
 tr[id] { scroll-margin-top: 4em; }
+section[id] { scroll-margin-top: 4em; }
+
+/* Creature artwork galleries (Pictures page + inline on creature pages) */
+.creature-pic { max-width: 100%; height: auto; display: block; border-radius: 4px; }
+.creature-pics figure, .items-content figure { margin: 0 0 1em; }
 
 /* NWN canonical damage / effect text colours.
  * Source: https://nwn.wiki/spaces/NWN1/pages/38177018/Colour+Tokens
