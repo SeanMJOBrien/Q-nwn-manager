@@ -249,6 +249,7 @@ def _nav():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
             if _has_wiki_current():
                 links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
+                links.append("<a href='%s'>Map</a>" % purl("/wiki/map/"))
     stop = ("<form method='post' action='%s' class='stop-console' "
             "onsubmit=\"return confirm('Stop the console server?')\">"
             "<button type='submit'>Stop console</button></form>" % gurl("/shutdown"))
