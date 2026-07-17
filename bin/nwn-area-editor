@@ -497,6 +497,13 @@ LIGHT_NUM_FIELDS = [
 ]
 LIGHT_COLOR_FIELDS = ["SunAmbientColor", "SunDiffuseColor", "SunFogColor",
                       "MoonAmbientColor", "MoonDiffuseColor", "MoonFogColor"]
+# (field, gff type, hint) - all are ambientmusic.2da row indices except MusicDelay
+MUSIC_FIELDS = [
+    ("MusicDay", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicNight", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
+]
 
 
 def are_path(root, res):
@@ -555,6 +562,7 @@ def render_areas(root, query):
     body.append("With selected: "
                 "<button name='action' value='scripts'>Edit scripts</button>"
                 "<button name='action' value='lighting'>Edit lighting/fog</button>"
+                "<button name='action' value='music'>Edit music</button>"
                 "<button name='action' value='tags'>Edit tags</button>"
                 "</form>")
     body.append("<p class='note'>%d areas shown.</p>" % len(rows))
@@ -654,6 +662,47 @@ def apply_lighting(root, form):
             invalidate(path)
             changed.append(res)
     return result_page("Lighting updated", changed, resrefs)
+
+
+def render_music_form(root, resrefs):
+    # Prefill from the first selected area so single-area edits show state.
+    d0 = load_cached(are_path(root, resrefs[0]))
+    rows = "".join(
+        "<tr><td>%s</td>"
+        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
+        "<td>%s</td><td class='note'>%s</td></tr>" %
+        (f, f, esc(getv(d0, f, "")), hint)
+        for f, _t, hint in MUSIC_FIELDS)
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>"
+            "<form method='post' action='%s'>%s"
+            "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
+            "<th>Hint</th></tr>%s</table>"
+            "<p class='note'>Blank fields are left unchanged on every area. "
+            "Day/Night/Battle values are row indices into ambientmusic.2da "
+            "(look them up with the toolset's music picker or nwn-mcp's "
+            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<input type='submit' value='Apply to selected areas'></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
+             hidden_resrefs(resrefs), esc(resrefs[0]), rows))
+    return page("Bulk edit area music", body)
+
+
+def apply_music(root, form):
+    resrefs, changed = form.get("res", []), []
+    for res in resrefs:
+        path = are_path(root, res)
+        d = json_load(path)
+        touched = False
+        for f, gff_type, _hint in MUSIC_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if val:
+                setv(d, f, int(val), gff_type)
+                touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Music updated", changed, resrefs)
 
 
 def render_tags_form(root, resrefs):
@@ -1234,6 +1283,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
+                      "music": render_music_form,
                       "tags": render_tags_form}.get(action, render_scripts_form)
             self._send(render(root, resrefs))
         elif sub == "/creatures":
@@ -1319,12 +1369,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
+                      "music": render_music_form,
                       "tags": render_tags_form}[action]
             self._send(render(root, resrefs))
         elif sub == "/areas/scripts/apply":
             self._send(apply_scripts(root, form))
         elif sub == "/areas/lighting/apply":
             self._send(apply_lighting(root, form))
+        elif sub == "/areas/music/apply":
+            self._send(apply_music(root, form))
         elif sub == "/areas/tags/apply":
             self._send(apply_tags(root, proj.git_root, proj.gic_root, form))
         elif sub == "/creature/apply":
