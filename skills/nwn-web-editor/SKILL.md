@@ -63,6 +63,15 @@ python3 ~/.claude/skills/nwn-web-editor/scripts/nwn_web_editor.py \
 
 ## Area map generator (scripts/nwn_area_map.py)
 
+The multi-project web console (`nwn-manager console`) has a live version of
+this built in, at `/p/<slug>/areas/map` (or `/areas/map` in legacy single-dir
+mode) — same layout algorithm, reading `unpacked/*.are.json`/`*.git.json`
+directly (no `nwn_gff` needed) and linking each area node straight into that
+project's own edit forms. Use this standalone script instead when you want a
+single portable HTML file (no running server needed, e.g. to attach to an
+issue or host statically) or need to point at a flat binary-GFF directory
+outside a nasher project.
+
 Companion script producing a **self-contained pan/zoomable HTML map** of all
 areas, laid out by the cardinal directions implied by door/trigger
 transitions (exit position in source vs. landing position in destination

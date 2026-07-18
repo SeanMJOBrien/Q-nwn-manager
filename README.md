@@ -331,10 +331,15 @@ home page you can:
   `/p/<slug>/wiki/` — no external web server needed.
 - **Build & download** the packed `.mod` (`nwn-manager repack`), then download
   it from `/p/<slug>/download`.
-- **Bulk-edit areas** (event scripts, lighting/fog, tags/resrefs), **creatures**
-  (abilities, stats, feats, appearance) and **module info** — all JSON-native,
-  editing `unpacked/*.are.json` / `*.utc.json` / `module.ifo.json` directly
-  (every first edit writes a one-time `.bak` sibling).
+- **Bulk-edit areas** (event scripts, lighting/fog, ambient music, tags/resrefs),
+  **creatures** (abilities, stats, feats, appearance) and **module info** — all
+  JSON-native, editing `unpacked/*.are.json` / `*.utc.json` / `module.ifo.json`
+  directly (every first edit writes a one-time `.bak` sibling).
+- **Area Map** (`/p/<slug>/areas/map`) — an interactive, pan/zoomable map of
+  the project's areas laid out by their door/trigger/waypoint transitions;
+  click a node to jump straight into that area's edit forms. (Distinct from
+  the wiki's own read-only "Map" page, which shows the same kind of layout
+  but for the published wiki, not live editing.)
 
 Long operations (build ~minutes, wiki ~30s, ingest) run as background jobs with
 a live-progress page (`/jobs/<id>`). Binds `127.0.0.1` only; put it behind a
