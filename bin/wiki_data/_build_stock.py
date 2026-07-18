@@ -55,6 +55,9 @@ TARGETS = [
     ("feat.2da",        "feat",        "FEAT", "LABEL"),
     ("skills.2da",      "skills",      "Name", "Label"),
     ("spells.2da",      "spells",      "Name", "Label"),
+    # portraits.2da has no TLK-referenced display name - BaseResRef doubles
+    # as both columns, same as the CEP overlay builder (cep/_build.py).
+    ("portraits.2da",   "portraits",   "BaseResRef", "BaseResRef"),
 ]
 
 # baseitems.2da columns we cache as raw numeric values for weapon damage /
