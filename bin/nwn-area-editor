@@ -527,6 +527,41 @@ AREA_FLAG_INTERIOR = 1
 AREA_FLAG_UNDERGROUND = 2
 AREA_FLAG_NATURAL = 4
 
+# Stock NWN1 tileset resrefs -> human-readable names (from bin/nwn-wiki,
+# reused verbatim). Covers only stock tilesets; haks (e.g. CEP) add custom
+# ones not in this table, which correctly fall back to the raw resref.
+TILESETS = {
+    "tcn01": "City Exterior 1",
+    "tcn02": "City Exterior 2",
+    "tdc01": "Castle Interior 1",
+    "tdc02": "Castle Interior 2",
+    "tde01": "Castle Interior, Illuminated",
+    "tdm01": "Mines and Caverns",
+    "tdr01": "Rural",
+    "tds01": "Sewers",
+    "tib01": "Beholder Caves",
+    "tic01": "City Interior",
+    "til01": "Lizardfolk Interior",
+    "tin01": "Crypt",
+    "tni01": "Mines, Lower",
+    "tno01": "Forest",
+    "ttd01": "Desert",
+    "tte01": "Forest, Drow",
+    "ttf01": "Frozen Wastes",
+    "ttp01": "Microset",
+    "ttr01": "Rural Winter",
+    "tts01": "Snow",
+    "ttu01": "Underdark",
+    "ttz01": "Mountains",
+    "twc01": "Castle Exterior, Rural",
+}
+
+
+def tileset_name(resref):
+    if not resref:
+        return ""
+    return TILESETS.get(resref.lower(), resref)
+
 
 def are_path(root, res):
     return os.path.join(root, res + ".are.json")
@@ -584,7 +619,8 @@ def render_areas(root, query):
     if f_underground:
         rows = [r for r in rows if r["flags"] & AREA_FLAG_UNDERGROUND]
     opts = "".join("<option value='%s'%s>%s</option>" %
-                   (esc(t), " selected" if t == tileset else "", esc(t or "(any)"))
+                   (esc(t), " selected" if t == tileset else "",
+                    esc(tileset_name(t) if t else "(any)"))
                    for t in [""] + tilesets)
 
     def cb(name, label, checked):
@@ -627,7 +663,7 @@ def render_areas(root, query):
             "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
             tuple(esc(x) for x in (
-                r["res"], r["res"], r["name"], r["tag"], r["tileset"],
+                r["res"], r["res"], r["name"], r["tag"], tileset_name(r["tileset"]),
                 area_type_label(r["flags"]),
                 r["scripts"]["OnEnter"], r["scripts"]["OnExit"],
                 r["scripts"]["OnHeartbeat"], r["scripts"]["OnUserDefined"])))
