@@ -649,6 +649,7 @@ def render_areas(root, query):
         "<button form='areasSelect' name='action' value='lighting'>Edit lighting/fog</button>"
         "<button form='areasSelect' name='action' value='music'>Edit music</button>"
         "<button form='areasSelect' name='action' value='tags'>Edit tags</button>"
+        "<button form='areasSelect' name='action' value='remove_objects'>Remove objects</button>"
         "</div></div>",
         "<form id='areasSelect' method='post' action='%s'>" % purl("/areas/select"),
         "<table class='areas'><thead><tr><th><input type='checkbox' "
@@ -894,6 +895,155 @@ def result_page(title, changed, selected, extra=""):
              esc(", ".join(changed) or "(nothing - all values blank/same)"),
              extra, purl("/areas")))
     return page(title, body)
+
+
+# --- Remove placed objects (creatures/placeables/loose items + their -------
+#     nested inventory) from selected areas' .git.json -----------------------
+# Top-level placed-object list fields, keyed by a short URL-safe category
+# name. Field name spacing is genuinely inconsistent in GFF-JSON ("Creature
+# List" / "Placeable List" are spaced, bare "List" holds loose ground items)
+# - that's the real shape, not a typo to fix.
+OBJECT_LIST_FIELDS = {
+    "creature": "Creature List",
+    "placeable": "Placeable List",
+    "item": "List",
+}
+
+# Nested inventory fields per top-level category. Loose items have no
+# inventory of their own here, so "item" is intentionally absent.
+INVENTORY_SUBFIELDS = {
+    "creature": [("Equip_ItemList", "Equipped"), ("ItemList", "Carried")],
+    "placeable": [("ItemList", "Carried")],
+}
+
+
+def _obj_position(entry):
+    x = getv(entry, "X", getv(entry, "XPosition", 0.0))
+    y = getv(entry, "Y", getv(entry, "YPosition", 0.0))
+    return x, y
+
+
+def _inventory_rows_html(res, category, idx, entry):
+    rows = []
+    for subfield, label in INVENTORY_SUBFIELDS.get(category, []):
+        items = getv(entry, subfield, [])
+        for sub_idx, item in enumerate(items):
+            resref = getv(item, "EquippedRes", getv(item, "InventoryRes", ""))
+            where = label
+            if subfield == "Equip_ItemList":
+                slot_id = item.get("__struct_id", 0)
+                where = "%s (%s)" % (label, EQUIP_SLOT_NAMES.get(
+                    slot_id, "Slot %s" % slot_id))
+            cb_value = "|".join((res, category, str(idx), subfield, str(sub_idx)))
+            rows.append(
+                "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                "<td colspan='3'>%s: %s</td></tr>" %
+                (esc(cb_value), esc(where), esc(resref)))
+    if not rows:
+        return ""
+    return ("<tr><td></td><td colspan='3'><table class='nested'>%s</table>"
+            "</td></tr>" % "".join(rows))
+
+
+def render_remove_objects_form(root, git_root, resrefs):
+    sections = []
+    for res in resrefs:
+        path = git_path(git_root, res)
+        if not os.path.isfile(path):
+            continue
+        g = load_cached(path)
+        area_rows = []
+        for category, field in OBJECT_LIST_FIELDS.items():
+            entries = getv(g, field, [])
+            for idx, entry in enumerate(entries):
+                tag = getv(entry, "Tag", "")
+                blueprint = getv(entry, "TemplateResRef", "")
+                x, y = _obj_position(entry)
+                cb_value = "|".join((res, category, str(idx)))
+                area_rows.append(
+                    "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%.1f, %.1f</td></tr>" %
+                    (esc(cb_value), esc(category), esc(tag), esc(blueprint), x, y))
+                area_rows.append(_inventory_rows_html(res, category, idx, entry))
+        area_rows = [r for r in area_rows if r]
+        if not area_rows:
+            continue
+        sections.append(
+            "<h3>%s</h3><table><tr><th></th><th>Type</th><th>Tag</th>"
+            "<th>Blueprint</th><th>Position</th></tr>%s</table>" %
+            (esc(res), "".join(area_rows)))
+
+    if not sections:
+        return page("Remove placed objects",
+                    "<p class='note'>No placeables, creatures, or loose "
+                    "items found in the selected area(s).</p>"
+                    "<p><a href='%s'>Back</a></p>" % purl("/areas"))
+
+    body = ("<form method='post' action='%s'>%s%s"
+            "<p class='note'>Tick objects to REMOVE, then Apply. First edit "
+            "of each area keeps a one-time .git.json.bak backup, but this is "
+            "otherwise permanent - review before applying.</p>"
+            "<input type='submit' value='Remove selected'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
+             "".join(sections), purl("/areas")))
+    return page("Remove placed objects", body)
+
+
+def apply_remove_objects(root, git_root, form):
+    resrefs = form.get("res", [])
+    top_doomed = defaultdict(set)
+    nested_doomed = defaultdict(set)
+    for val in form.get("del", []):
+        parts = val.split("|")
+        if len(parts) == 3:
+            res, category, idx_s = parts
+            if res in resrefs and category in OBJECT_LIST_FIELDS:
+                top_doomed[(res, category)].add(int(idx_s))
+        elif len(parts) == 5:
+            res, category, idx_s, subfield, sub_s = parts
+            if res in resrefs and category in OBJECT_LIST_FIELDS:
+                nested_doomed[(res, category, int(idx_s), subfield)].add(int(sub_s))
+
+    changed = []
+    for res in resrefs:
+        path = git_path(git_root, res)
+        if not os.path.isfile(path):
+            continue
+        g = json_load(path)
+        touched = False
+
+        # Nested removals first: filter a container entry's own sub-list in
+        # place. If that same container is also doomed at the top level, the
+        # whole entry disappears next anyway, so order doesn't matter.
+        for (nres, category, idx, subfield), sub_idx_set in nested_doomed.items():
+            if nres != res:
+                continue
+            entries = getv(g, OBJECT_LIST_FIELDS[category], [])
+            if idx >= len(entries):
+                continue
+            container = entries[idx]
+            items = getv(container, subfield, [])
+            kept = [it for i, it in enumerate(items) if i not in sub_idx_set]
+            if len(kept) != len(items):
+                setv(container, subfield, kept, "list")
+                touched = True
+
+        for category, field in OBJECT_LIST_FIELDS.items():
+            idx_set = top_doomed.get((res, category))
+            if not idx_set:
+                continue
+            entries = getv(g, field, [])
+            kept = [e for i, e in enumerate(entries) if i not in idx_set]
+            if len(kept) != len(entries):
+                setv(g, field, kept, "list")
+                touched = True
+
+        if touched:
+            json_save(path, g)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Objects removed", changed, resrefs)
 
 
 # --- Area map (ported from skills/nwn-web-editor/scripts/nwn_area_map.py) ---
@@ -1281,6 +1431,7 @@ MAP_PAGE = """<!doctype html>
  <a id="plight" target="_blank">Lighting &amp; fog settings</a>
  <a id="ptags" target="_blank">Tag / resref</a>
  <a id="pscripts" target="_blank">Event scripts</a>
+ <a id="pobjects" target="_blank">Remove objects</a>
  <a id="plist" target="_blank">Open in editor area list</a></div>
 <script>
 const BASE=%(base)s;
@@ -1330,6 +1481,7 @@ stage.addEventListener('click',e=>{
  document.getElementById('plight').href=BASE+'/areas/edit?action=lighting&res='+q;
  document.getElementById('ptags').href=BASE+'/areas/edit?action=tags&res='+q;
  document.getElementById('pscripts').href=BASE+'/areas/edit?action=scripts&res='+q;
+ document.getElementById('pobjects').href=BASE+'/areas/edit?action=remove_objects&res='+q;
  document.getElementById('plist').href=BASE+'/areas?q='+q;
  popup.style.left=Math.min(e.clientX+8,innerWidth-260)+'px';
  popup.style.top=Math.min(e.clientY+8,innerHeight-190)+'px';
@@ -2008,6 +2160,9 @@ class Handler(BaseHTTPRequestHandler):
                                 "<p class='err'>No such area here.</p>"
                                 "<p><a href='%s'>Area list</a></p>" % purl("/areas")), 404)
                 return
+            if action == "remove_objects":
+                self._send(render_remove_objects_form(root, proj.git_root, resrefs))
+                return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
                       "music": render_music_form,
@@ -2096,6 +2251,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(page("No areas selected",
                                 "<p><a href='%s'>Back</a></p>" % purl("/areas")))
                 return
+            if action == "remove_objects":
+                self._send(render_remove_objects_form(root, proj.git_root, resrefs))
+                return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
                       "music": render_music_form,
@@ -2109,6 +2267,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(apply_music(root, form))
         elif sub == "/areas/tags/apply":
             self._send(apply_tags(root, proj.git_root, proj.gic_root, form))
+        elif sub == "/areas/objects/apply":
+            self._send(apply_remove_objects(root, proj.git_root, form))
         elif sub == "/creature/apply":
             res = form.get("res", [""])[0]
             cpath = utc_path(root, res)
