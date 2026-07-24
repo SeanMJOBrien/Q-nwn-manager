@@ -4389,14 +4389,14 @@ class Db:
         for s in starts:
             i = fld(s, "Index")
             if isinstance(i, int) and 0 <= i < len(entries):
-                txt = nwn_text(loc(entries[i].get("Text")))
-                txt = txt.strip().splitlines()[0] if txt else ""
+                txt = nwn_text(loc(entries[i].get("Text"))).strip()
+                txt = txt.splitlines()[0] if txt else ""
                 if txt:
                     return (txt[:60] + "…") if len(txt) > 63 else txt
         # Fall back to the first non-empty entry text.
         for e in entries:
-            txt = nwn_text(loc(e.get("Text")))
-            txt = txt.strip().splitlines()[0] if txt else ""
+            txt = nwn_text(loc(e.get("Text"))).strip()
+            txt = txt.splitlines()[0] if txt else ""
             if txt:
                 return (txt[:60] + "…") if len(txt) > 63 else txt
         return resref
