@@ -812,7 +812,7 @@ cmd_wiki() {
   # empty-string argument when the array is empty instead of zero arguments
   # - use the ${arr[@]+"${arr[@]}"} form, already used for $pass_through
   # above, which is correct in both cases.)
-  exec "$SCRIPT_DIR/nwn-wiki" --src unpacked --out "$out" \
+  exec python3 "$SCRIPT_DIR/nwn-wiki" --src unpacked --out "$out" \
     ${tlk_args[@]+"${tlk_args[@]}"} "$@"
 }
 
@@ -834,7 +834,7 @@ cmd_console() {
     projects_dir=$(cd "$SCRIPT_DIR/.." && pwd)/projects
   fi
   mkdir -p "$projects_dir"
-  exec "$SCRIPT_DIR/nwn-area-editor" --projects-dir "$projects_dir" "$@"
+  exec python3 "$SCRIPT_DIR/nwn-area-editor" --projects-dir "$projects_dir" "$@"
 }
 
 cmd_edit_areas() {
@@ -856,7 +856,7 @@ cmd_edit_areas() {
     esac
   done
 
-  exec "$SCRIPT_DIR/nwn-area-editor" --dir "$dir" "$@"
+  exec python3 "$SCRIPT_DIR/nwn-area-editor" --dir "$dir" "$@"
 }
 
 cmd_serve() {
