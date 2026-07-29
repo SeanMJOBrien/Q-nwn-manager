@@ -330,10 +330,13 @@ cmd_init() {
     mv src unpacked
   fi
   # Patch nasher.cfg: src → unpacked in include + rules.
-  sed -i \
+  # (portable form: BSD sed on macOS requires -i '', GNU sed on Linux
+  # doesn't accept it — write to a temp file and move instead of -i)
+  sed \
     -e 's|"src/\*\*|"unpacked/**|g' \
     -e 's|"\*" = "src"|"*" = "unpacked"|g' \
-    nasher.cfg
+    nasher.cfg > nasher.cfg.tmp
+  mv nasher.cfg.tmp nasher.cfg
 
   mkdir -p .nasher
   printf '%s\n' "$mod_abs" > .nasher/source
