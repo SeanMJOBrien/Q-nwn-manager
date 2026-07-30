@@ -56,7 +56,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PROJECTS_DIR = None    # multi-project root (None in legacy single-dir mode)
 SINGLE_MODE = False     # True when launched with --dir instead of --projects-dir
 SINGLE_PROJECT = None   # the implicit Project in single-dir mode
-NWN_MANAGER = None      # path to the nwn-manager wrapper (for init/unpack/wiki/repack)
+NWN_MANAGER = None      # argv prefix for the nwn-manager wrapper (for init/unpack/wiki/repack)
 LANDING_DIR = None      # where start.html lives and dropped .mod files are scanned
 SERVER = None           # the ThreadingHTTPServer (for the /shutdown "Stop" button)
 
@@ -2292,17 +2292,17 @@ class Handler(BaseHTTPRequestHandler):
     def _project_action(self, proj, sub):
         if sub == "/ingest":
             job = Job("Re-ingest %s" % proj.slug,
-                      [NWN_MANAGER, "unpack"], cwd=proj.root,
+                      NWN_MANAGER + ["unpack"], cwd=proj.root,
                       kind="ingest", slug=proj.slug)
             job.phase = "unpacking module"
         elif sub == "/wiki":
             job = Job("Wiki %s" % proj.slug,
-                      [NWN_MANAGER, "wiki"], cwd=proj.root,
+                      NWN_MANAGER + ["wiki"], cwd=proj.root,
                       kind="wiki", slug=proj.slug)
             job.phase = "generating wiki"
         else:  # /build
             job = Job("Build %s" % proj.slug,
-                      [NWN_MANAGER, "repack"], cwd=proj.root,
+                      NWN_MANAGER + ["repack"], cwd=proj.root,
                       kind="build", slug=proj.slug)
             job.phase = "starting build"
         start_job(job)
@@ -2420,7 +2420,7 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.rmtree(cleanup, ignore_errors=True)
 
         job = Job("Ingest %s" % slug,
-                  [NWN_MANAGER, "init", proj_dir, mod_path],
+                  NWN_MANAGER + ["init", proj_dir, mod_path],
                   cwd=PROJECTS_DIR, kind="ingest", slug=slug,
                   on_success=on_success)
         start_job(job)
@@ -2463,16 +2463,36 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _find_nwn_manager(explicit):
-    candidates = [explicit] if explicit else []
-    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "nwn-manager"))
+    """Returns an argv prefix (list) for invoking the nwn-manager wrapper.
+
+    On Windows the bash script can't be exec'd directly - CreateProcess has
+    no shebang support, so trying yields WinError 193 ("not a valid Win32
+    application"). nwn-manager.ps1 is preferred there instead, invoked
+    through powershell.exe. Elsewhere the bash script's shebang works as-is.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def as_argv(path):
+        if path and path.lower().endswith(".ps1"):
+            return ["powershell", "-ExecutionPolicy", "Bypass", "-File", path]
+        return [path]
+
+    if explicit:
+        return as_argv(explicit)
+
+    if os.name == "nt":
+        ps1 = os.path.join(here, "nwn-manager.ps1")
+        if os.path.isfile(ps1):
+            return as_argv(ps1)
+
+    candidates = [os.path.join(here, "nwn-manager")]
     found = shutil.which("nwn-manager")
     if found:
         candidates.append(found)
     for c in candidates:
         if c and os.path.isfile(c) and os.access(c, os.X_OK):
-            return c
-    return candidates[0]  # best guess; jobs will surface the error if wrong
+            return as_argv(c)
+    return as_argv(candidates[0])  # best guess; jobs will surface the error if wrong
 
 
 def main():
@@ -2535,7 +2555,7 @@ def main():
         print("projects dir: %s" % PROJECTS_DIR)
 
     global SERVER
-    print("nwn-manager: %s" % NWN_MANAGER)
+    print("nwn-manager: %s" % " ".join(NWN_MANAGER))
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     SERVER = srv
     base = "http://%s:%d%s" % (args.host, args.port, Handler.url_prefix)
