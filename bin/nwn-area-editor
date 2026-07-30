@@ -930,12 +930,24 @@ def _obj_position(entry):
     return x, y
 
 
+def _obj_name(category, entry):
+    """Display name for a placed instance - .git entries carry the same
+    localized-name fields as their blueprint (FirstName/LastName for
+    creatures, LocalizedName/LocName for placeables and items)."""
+    if category == "creature":
+        first = loc_get(entry, "FirstName")
+        last = loc_get(entry, "LastName")
+        return ("%s %s" % (first, last)).strip()
+    return loc_get(entry, "LocalizedName") or loc_get(entry, "LocName") or ""
+
+
 def _inventory_rows_html(res, category, idx, entry):
     rows = []
     for subfield, label in INVENTORY_SUBFIELDS.get(category, []):
         items = getv(entry, subfield, [])
         for sub_idx, item in enumerate(items):
             resref = getv(item, "EquippedRes", getv(item, "InventoryRes", ""))
+            name = item_name(item)
             where = label
             if subfield == "Equip_ItemList":
                 slot_id = item.get("__struct_id", 0)
@@ -944,11 +956,12 @@ def _inventory_rows_html(res, category, idx, entry):
             cb_value = "|".join((res, category, str(idx), subfield, str(sub_idx)))
             rows.append(
                 "<tr><td><input type='checkbox' name='del' value='%s'></td>"
-                "<td colspan='3'>%s: %s</td></tr>" %
-                (esc(cb_value), esc(where), esc(resref)))
+                "<td colspan='4'>%s: %s%s</td></tr>" %
+                (esc(cb_value), esc(where), esc(resref),
+                 " (%s)" % esc(name) if name else ""))
     if not rows:
         return ""
-    return ("<tr><td></td><td colspan='3'><table class='nested'>%s</table>"
+    return ("<tr><td></td><td colspan='4'><table class='nested'>%s</table>"
             "</td></tr>" % "".join(rows))
 
 
@@ -964,19 +977,21 @@ def render_remove_objects_form(root, git_root, resrefs):
             entries = getv(g, field, [])
             for idx, entry in enumerate(entries):
                 tag = getv(entry, "Tag", "")
+                name = _obj_name(category, entry)
                 blueprint = getv(entry, "TemplateResRef", "")
                 x, y = _obj_position(entry)
                 cb_value = "|".join((res, category, str(idx)))
                 area_rows.append(
                     "<tr><td><input type='checkbox' name='del' value='%s'></td>"
-                    "<td>%s</td><td>%s</td><td>%s</td><td>%.1f, %.1f</td></tr>" %
-                    (esc(cb_value), esc(category), esc(tag), esc(blueprint), x, y))
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%.1f, %.1f</td></tr>" %
+                    (esc(cb_value), esc(category), esc(name), esc(tag),
+                     esc(blueprint), x, y))
                 area_rows.append(_inventory_rows_html(res, category, idx, entry))
         area_rows = [r for r in area_rows if r]
         if not area_rows:
             continue
         sections.append(
-            "<h3>%s</h3><table><tr><th></th><th>Type</th><th>Tag</th>"
+            "<h3>%s</h3><table><tr><th></th><th>Type</th><th>Name</th><th>Tag</th>"
             "<th>Blueprint</th><th>Position</th></tr>%s</table>" %
             (esc(res), "".join(area_rows)))
 
@@ -1628,6 +1643,10 @@ def portrait_name(portrait_id):
     return _load_stock_json("portraits").get(str(portrait_id), str(portrait_id))
 
 
+def feat_name(feat_id):
+    return _load_stock_json("feat").get(str(feat_id), str(feat_id))
+
+
 def utc_path(root, res):
     return os.path.join(root, res + ".utc.json")
 
@@ -1672,6 +1691,10 @@ def render_creatures(root, query):
     return page("Creature blueprints (.utc)", "".join(body))
 
 
+def item_name(item):
+    return loc_get(item, "LocalizedName") or loc_get(item, "LocName") or ""
+
+
 def render_equipment(d):
     equipped = getv(d, "Equip_ItemList", [])
     carried = getv(d, "ItemList", [])
@@ -1681,18 +1704,22 @@ def render_equipment(d):
         for item in sorted(equipped, key=lambda i: i.get("__struct_id", 0)):
             slot_id = item.get("__struct_id", 0)
             slot = EQUIP_SLOT_NAMES.get(slot_id, "Slot %s" % slot_id)
-            rows.append("<tr><td>%s</td><td>%s</td></tr>" %
-                        (esc(slot), esc(getv(item, "EquippedRes", ""))))
-        equip_html = ("<table><tr><th>Slot</th><th>ResRef</th></tr>%s</table>"
-                     % "".join(rows))
+            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                        (esc(slot), esc(getv(item, "EquippedRes", "")),
+                         esc(item_name(item))))
+        equip_html = ("<table><tr><th>Slot</th><th>ResRef</th><th>Name</th></tr>"
+                     "%s</table>" % "".join(rows))
     else:
         equip_html = "<p class='note'>nothing equipped</p>"
 
     if carried:
-        carried_html = ("<p>%d item%s carried: %s</p>" %
-                        (len(carried), "" if len(carried) == 1 else "s",
-                         ", ".join(esc(getv(i, "InventoryRes", ""))
-                                  for i in carried)))
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td></tr>" %
+            (esc(getv(item, "InventoryRes", "")), esc(item_name(item)))
+            for item in carried)
+        carried_html = ("<p>%d item%s carried:</p>"
+                        "<table><tr><th>ResRef</th><th>Name</th></tr>%s</table>" %
+                        (len(carried), "" if len(carried) == 1 else "s", rows))
     else:
         carried_html = "<p class='note'>nothing carried</p>"
 
@@ -1714,7 +1741,8 @@ def render_char_form(d, action, ident_html):
     feats = sorted(getv(f, "Feat", -1) for f in getv(d, "FeatList", []))
     feat_boxes = "".join(
         "<label style='display:inline-block;margin:.15em .5em'>"
-        "<input type='checkbox' name='delfeat' value='%d'> %d</label>" % (n, n)
+        "<input type='checkbox' name='delfeat' value='%d'> %d %s</label>" %
+        (n, n, esc(feat_name(n)))
         for n in feats)
 
     return (
