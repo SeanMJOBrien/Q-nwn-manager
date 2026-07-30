@@ -144,7 +144,7 @@ def _load_stock_item_names() -> tuple[dict[str, str], dict[str, int], dict[str, 
     p = DATA_DIR / "stock_item_names.json"
     if not p.exists():
         return {}, {}, {}, {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     names: dict[str, str] = {}
     base_items: dict[str, int] = {}
     costs: dict[str, int] = {}
@@ -177,7 +177,7 @@ def _load_stock_creature_names() -> dict[str, str]:
     p = DATA_DIR / "stock_creature_names.json"
     if not p.exists():
         return {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     return {k: v for k, v in raw.items()
             if not k.startswith("_") and isinstance(v, str)}
 
@@ -236,7 +236,7 @@ def _load_lookup(name: str) -> dict[int, str]:
     if not p.exists():
         return {}
     try:
-        raw = json.loads(p.read_text())
+        raw = json.loads(p.read_text(encoding="utf-8"))
     except Exception as e:
         print(f"warn: could not parse {p}: {e}", file=sys.stderr)
         return {}
@@ -275,7 +275,7 @@ def _load_spell_info() -> dict[str, dict[int, dict]]:
     p = DATA_DIR / "spell_info.json"
     if not p.exists():
         return {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     result: dict[str, dict[int, dict]] = {}
     for k, v in raw.items():
         if k.startswith("_") or not isinstance(v, dict):
@@ -299,7 +299,7 @@ def _load_weapons() -> dict[int, dict[str, str]]:
     p = DATA_DIR / "weapons.json"
     if not p.exists():
         return {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     return {int(k): v for k, v in raw.items()
             if not k.startswith("_") and isinstance(v, dict)}
 
@@ -313,7 +313,7 @@ def _load_class_bab() -> dict[int, list[int]]:
     p = DATA_DIR / "class_bab.json"
     if not p.exists():
         return {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     return {int(k): v for k, v in raw.items()
             if not k.startswith("_") and isinstance(v, list)}
 
@@ -329,7 +329,7 @@ def _load_race_adjust() -> dict[int, dict[str, int]]:
     p = DATA_DIR / "race_adjust.json"
     if not p.exists():
         return {}
-    raw = json.loads(p.read_text())
+    raw = json.loads(p.read_text(encoding="utf-8"))
     out: dict[int, dict[str, int]] = {}
     for k, v in raw.items():
         if k.startswith("_") or not isinstance(v, dict):
@@ -403,7 +403,7 @@ def _load_itemprops() -> dict:
     p = DATA_DIR / "itemprops.json"
     if not p.exists():
         return {"properties": {}, "tables": {}}
-    return json.loads(p.read_text())
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 ITEMPROPS = _load_itemprops()
@@ -2204,7 +2204,7 @@ class Db:
             kind = parts[-1].lower()
             resref = ".".join(parts[:-1])
             try:
-                obj = json.loads(path.read_text())
+                obj = json.loads(path.read_text(encoding="utf-8"))
             except Exception as e:
                 print(f"  warn: failed to parse {name}: {e}", file=sys.stderr)
                 continue
@@ -3027,7 +3027,7 @@ class Db:
         _include_text_cache: dict[str, str] = {}
         for _rr, _path in self.script_paths.items():
             try:
-                _include_text_cache[_rr] = _path.read_text(errors="replace")
+                _include_text_cache[_rr] = _path.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 _include_text_cache[_rr] = ""
 
@@ -3035,7 +3035,7 @@ class Db:
             if inc_rr not in _include_text_cache:
                 p = self.script_paths.get(inc_rr)
                 try:
-                    _include_text_cache[inc_rr] = p.read_text(errors="replace") if p else ""
+                    _include_text_cache[inc_rr] = p.read_text(encoding="utf-8", errors="replace") if p else ""
                 except Exception:
                     _include_text_cache[inc_rr] = ""
             return _include_text_cache[inc_rr]
@@ -5225,7 +5225,7 @@ def page(title: str, body: str, root_rel: str = ".", page_updated_at: str = "") 
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
 
 def load_wiki_theme(project_root: Path, out: Path) -> None:
@@ -5258,7 +5258,7 @@ def load_wiki_theme(project_root: Path, out: Path) -> None:
             # [{"label": "Area Map", "url": "/qarea/"}]. Absolute URLs only -
             # they sit outside the generated tree so root_rel doesn't apply.
             try:
-                entries = json.loads(f.read_text())
+                entries = json.loads(f.read_text(encoding="utf-8"))
                 _THEME_EXTRA_NAV = [e for e in entries
                                     if isinstance(e, dict) and e.get("label") and e.get("url")]
                 loaded.append(f"extra-nav={len(_THEME_EXTRA_NAV)} link(s)")
@@ -5269,7 +5269,7 @@ def load_wiki_theme(project_root: Path, out: Path) -> None:
             # (proxied or direct). Enables "Edit this area" links on area
             # pages pointing at its lighting/tags/scripts forms.
             try:
-                _THEME_EDITOR_BASE = str(json.loads(f.read_text()).get("base", "")).rstrip("/")
+                _THEME_EDITOR_BASE = str(json.loads(f.read_text(encoding="utf-8")).get("base", "")).rstrip("/")
                 if _THEME_EDITOR_BASE:
                     loaded.append(f"editor={_THEME_EDITOR_BASE}")
             except (json.JSONDecodeError, OSError) as exc:
@@ -12621,7 +12621,7 @@ def render_script_page(db: Db, resref: str, out: Path) -> None:
     if not path:
         return
     try:
-        source = path.read_text(errors="replace")
+        source = path.read_text(encoding="utf-8", errors="replace")
     except Exception as e:
         source = f"(failed to read {path.name}: {e})"
     starts = sorted(db.script_dialogs.get(resref, set()))
@@ -13404,7 +13404,7 @@ def render_activity_page(activity: dict, out: Path, tz_label: str = "GMT+0") -> 
     _conc_cutoff = date(2026, 6, 1)
 
     date_range_daily = [d for d in date_range if d > _daily_cutoff]
-    daily_labels = [d.strftime("%b %-d") for d in date_range_daily]
+    daily_labels = [f"{d:%b} {d.day}" for d in date_range_daily]
     date_hour_values = [round(date_hours.get(d, 0.0), 2) for d in date_range_daily]
     chart_daily_hours = svg_vbar_chart(
         daily_labels, date_hour_values,
@@ -13416,7 +13416,7 @@ def render_activity_page(activity: dict, out: Path, tz_label: str = "GMT+0") -> 
         bar_color="#5a2b78",
     )
     date_range_conc = [d for d in date_range if d > _conc_cutoff]
-    conc_labels = [d.strftime("%b %-d") for d in date_range_conc]
+    conc_labels = [f"{d:%b} {d.day}" for d in date_range_conc]
     conc_values = [daily_peak_conc.get(d, 0) for d in date_range_conc]
     chart_concurrent = svg_vbar_chart(
         conc_labels, conc_values,
@@ -13484,7 +13484,8 @@ def render_activity_page(activity: dict, out: Path, tz_label: str = "GMT+0") -> 
         "<h2>Day of week</h2>\n"
         f'<div style="overflow-x:auto;">{chart_dow}</div>\n'
     )
-    now_str = datetime.now().strftime("%b %-d, %Y %H:%M")
+    _now = datetime.now()
+    now_str = f"{_now:%b} {_now.day}, {_now:%Y %H:%M}"
     write(out / "activity.html", page("Player Activity", body, page_updated_at=now_str))
     print(f"[nwn-wiki] rendered activity page ({n_sessions} sessions, {n_players} players)")
 
@@ -13745,7 +13746,8 @@ def render_manual_pages(project_root: Path, out: Path) -> None:
     # manual pages without DB access.
     sf_path = out / "manual" / "ServerFirsts.html"
     if _BESTIARY_ACTIVE:
-        sf_now = datetime.now().strftime("%b %-d, %Y %H:%M")
+        _sf_now = datetime.now()
+        sf_now = f"{_sf_now:%b} {_sf_now.day}, {_sf_now:%Y %H:%M}"
         _HAS_SERVER_FIRSTS = True
         pages_to_write.append((sf_path, "Server Firsts",
                                _render_server_first_body(), "..", sf_now))
@@ -13913,7 +13915,7 @@ def generate_tag_conflict_report(
     }
 
     out_path = module_index_dir / "item_tag_conflicts.json"
-    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    out_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if conflicts:
         _module_index_summary.append(("warn", f"[nwn-wiki] module-index: item_tag_conflicts.json ({len(conflicts)} conflict(s)) — {out_path}"))
     else:
@@ -14013,7 +14015,7 @@ def generate_store_tag_conflict_report(
             if conflicts else "No store tag conflicts found."
         ),
         "conflicts": conflicts,
-    }, indent=2, ensure_ascii=False) + "\n")
+    }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if conflicts:
         _module_index_summary.append(("warn", f"[nwn-wiki] module-index: store_tag_conflicts.json ({len(conflicts)} conflict(s)) — {out_path}"))
     else:
@@ -14102,7 +14104,7 @@ def generate_conversation_conflict_report(
             if duplicates else "No duplicate conversation trees found."
         ),
         "duplicates": duplicates,
-    }, indent=2, ensure_ascii=False) + "\n")
+    }, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     if duplicates:
         _module_index_summary.append(("warn", f"[nwn-wiki] module-index: duplicate_conversations.json ({len(duplicates)} group(s)) — {out_path}"))
     else:
@@ -14905,7 +14907,7 @@ def generate_module_index(
 
 
 def _write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def main() -> int:
@@ -14992,7 +14994,8 @@ def main() -> int:
     args = ap.parse_args()
 
     global _GENERATED_AT
-    _GENERATED_AT = datetime.now().strftime("%b %-d, %Y %H:%M")
+    _now = datetime.now()
+    _GENERATED_AT = f"{_now:%b} {_now.day}, {_now:%Y %H:%M}"
 
     src = Path(args.src).resolve()
     out = Path(args.out).resolve()
@@ -15148,7 +15151,8 @@ def main() -> int:
             if f.is_file():
                 shutil.copy2(f, out / "assets" / f.name)
     (out / "assets" / "meta.json").write_text(
-        json.dumps({"generated_at": _GENERATED_AT}, ensure_ascii=False)
+        json.dumps({"generated_at": _GENERATED_AT}, ensure_ascii=False),
+        encoding="utf-8",
     )
 
     # Load per-module theme from wiki-theme/ next to the unpacked/ directory.

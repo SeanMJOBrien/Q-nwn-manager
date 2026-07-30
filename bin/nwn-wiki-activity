@@ -157,7 +157,8 @@ def main() -> int:
 
     # Set globals required by page() and render_activity_page().
     wiki._HAS_ACTIVITY_PAGE = True
-    wiki._GENERATED_AT = datetime.now().strftime("%b %-d, %Y %H:%M")
+    _now = datetime.now()
+    wiki._GENERATED_AT = f"{_now:%b} {_now.day}, {_now:%Y %H:%M}"
     wiki._MANUAL_PAGES = []
     wiki.load_wiki_theme(src.parent, out)
 

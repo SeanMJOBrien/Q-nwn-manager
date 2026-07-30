@@ -92,7 +92,7 @@ _CACHE = {}
 
 
 def json_load(path):
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -102,7 +102,7 @@ def json_save(path, data):
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
     tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
         fh.write("\n")
     os.replace(tmp, path)
@@ -334,7 +334,7 @@ class Project:
         p = os.path.join(self.root, ".nasher", "source")
         if os.path.isfile(p):
             try:
-                return open(p).read().strip()
+                return open(p, encoding="utf-8").read().strip()
             except OSError:
                 return None
         return None
@@ -2537,7 +2537,7 @@ def main():
     NAV_EXTRA[:] = [(label, url) for label, _, url in
                     (n.partition("=") for n in args.nav) if url]
     if args.wiki_shell:
-        with open(args.wiki_shell) as fh:
+        with open(args.wiki_shell, encoding="utf-8") as fh:
             WIKI_SHELL = fh.read()
         WIKI_BASE = args.wiki_base.rstrip("/")
 
