@@ -209,6 +209,8 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
 .cancel-link{display:inline-block;padding:.4em 1em;margin:.2em;border:1px solid #555;
  border-radius:3px;color:#d8d9de;text-decoration:none}
 .cancel-link:hover{background:#2a2b31}
+th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:#333}
+.sort-arrow{font-size:.8em}
 """
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
@@ -234,6 +236,8 @@ input[type=submit],button{padding:.35em 1em;cursor:pointer;margin:.2em}
 table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
 .cancel-link{display:inline-block;padding:.35em 1em;margin:.2em;border:1px solid #8886;
  border-radius:3px;text-decoration:none}
+th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:Canvas}
+.sort-arrow{font-size:.8em}
 """
 
 
@@ -288,6 +292,59 @@ def page(title, body, head_extra=""):
 def hidden_resrefs(resrefs):
     return "".join("<input type='hidden' name='res' value='%s'>" % esc(r)
                    for r in resrefs)
+
+
+# --- Client-side column sorting ---------------------------------------------
+# One tiny reusable sorter shared by every table page (Areas, Creatures,
+# Remove objects): click a <th class='sortable'> to sort that table by its
+# column, click again to reverse. Pure client-side (no round trip) so it
+# doesn't disturb in-progress checkbox selections or filter state.
+#
+# A row tagged class='qnm-detail' is kept attached to the nearest preceding
+# non-detail row and moves with it - this is what keeps a creature/placeable's
+# nested equipped/carried rows under their parent row on the Remove objects
+# page instead of scattering them once sorted.
+SORT_SCRIPT = """
+<script>
+function qnmSortTable(th){
+  var table = th.closest('table');
+  var col = Array.prototype.indexOf.call(th.parentNode.children, th);
+  var groups = [];
+  Array.prototype.slice.call(table.rows, 1).forEach(function(r){
+    if (r.classList.contains('qnm-detail') && groups.length) {
+      groups[groups.length - 1].push(r);
+    } else {
+      groups.push([r]);
+    }
+  });
+  if (!groups.length) return;
+  var body = groups[0][0].parentNode;
+  var asc = th.getAttribute('data-dir') !== 'asc';
+  groups.sort(function(ga, gb){
+    var ca = ga[0].cells[col], cb = gb[0].cells[col];
+    var av = (ca.getAttribute('data-sort') || ca.textContent).trim().toLowerCase();
+    var bv = (cb.getAttribute('data-sort') || cb.textContent).trim().toLowerCase();
+    if (av < bv) return asc ? -1 : 1;
+    if (av > bv) return asc ? 1 : -1;
+    return 0;
+  });
+  groups.forEach(function(g){ g.forEach(function(r){ body.appendChild(r); }); });
+  Array.prototype.forEach.call(th.parentNode.children, function(h){
+    h.removeAttribute('data-dir');
+    var a = h.querySelector('.sort-arrow'); if (a) a.textContent = '';
+  });
+  th.setAttribute('data-dir', asc ? 'asc' : 'desc');
+  var arrow = th.querySelector('.sort-arrow');
+  if (arrow) arrow.textContent = asc ? ' \\u25b2' : ' \\u25bc';
+}
+</script>
+"""
+
+
+def sth(label):
+    """Sortable <th> - click to sort its table by this column, client-side."""
+    return ("<th class='sortable' onclick='qnmSortTable(this)'>%s"
+            "<span class='sort-arrow'></span></th>" % esc(label))
 
 
 # --- Project model ----------------------------------------------------------
@@ -662,8 +719,9 @@ def render_areas(root, query):
         "<table class='areas'><thead><tr><th><input type='checkbox' "
         "onclick=\"document.querySelectorAll('input[name=res]')"
         ".forEach(c=>c.checked=this.checked)\"></th>"
-        "<th>ResRef</th><th>Name</th><th>Tag</th><th>Tileset</th><th>Type</th>"
-        "<th>OnEnter</th><th>OnExit</th><th>OnHeartbeat</th><th>OnUserDefined</th></tr></thead>"
+        + sth("ResRef") + sth("Name") + sth("Tag") + sth("Tileset") + sth("Type")
+        + sth("OnEnter") + sth("OnExit") + sth("OnHeartbeat") + sth("OnUserDefined")
+        + "</tr></thead>"
         "<tbody>"]
     for r in rows:
         body.append(
@@ -691,6 +749,7 @@ def render_areas(root, query):
         " ths.forEach(function(c){ c.style.top=px; }); }"
         "sync(); window.addEventListener('resize', sync);"
         "})();</script>")
+    body.append(SORT_SCRIPT)
     return page("Areas", "".join(body))
 
 
@@ -961,8 +1020,8 @@ def _inventory_rows_html(res, category, idx, entry):
                  " (%s)" % esc(name) if name else ""))
     if not rows:
         return ""
-    return ("<tr><td></td><td colspan='4'><table class='nested'>%s</table>"
-            "</td></tr>" % "".join(rows))
+    return ("<tr class='qnm-detail'><td></td><td colspan='4'>"
+            "<table class='nested'>%s</table></td></tr>" % "".join(rows))
 
 
 def render_remove_objects_form(root, git_root, resrefs):
@@ -981,19 +1040,21 @@ def render_remove_objects_form(root, git_root, resrefs):
                 blueprint = getv(entry, "TemplateResRef", "")
                 x, y = _obj_position(entry)
                 cb_value = "|".join((res, category, str(idx)))
+                pos_sort = "%012.3f,%012.3f" % (x, y)
                 area_rows.append(
                     "<tr><td><input type='checkbox' name='del' value='%s'></td>"
-                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%.1f, %.1f</td></tr>" %
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                    "<td data-sort='%s'>%.1f, %.1f</td></tr>" %
                     (esc(cb_value), esc(category), esc(name), esc(tag),
-                     esc(blueprint), x, y))
+                     esc(blueprint), esc(pos_sort), x, y))
                 area_rows.append(_inventory_rows_html(res, category, idx, entry))
         area_rows = [r for r in area_rows if r]
         if not area_rows:
             continue
         sections.append(
-            "<h3>%s</h3><table><tr><th></th><th>Type</th><th>Name</th><th>Tag</th>"
-            "<th>Blueprint</th><th>Position</th></tr>%s</table>" %
-            (esc(res), "".join(area_rows)))
+            "<h3>%s</h3><table><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
+            (esc(res), sth("Type"), sth("Name"), sth("Tag"), sth("Blueprint"),
+             sth("Position"), "".join(area_rows)))
 
     if not sections:
         return page("Remove placed objects",
@@ -1009,7 +1070,7 @@ def render_remove_objects_form(root, git_root, resrefs):
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
              "".join(sections), purl("/areas")))
-    return page("Remove placed objects", body)
+    return page("Remove placed objects", body + SORT_SCRIPT)
 
 
 def apply_remove_objects(root, git_root, form):
@@ -1671,8 +1732,8 @@ def render_creatures(root, query):
     q = (query.get("q", [""])[0]).lower()
     body = ["<form method='get'>Filter: <input type='text' name='q' value='%s'>"
             "<input type='submit' value='Apply'></form>" % esc(q),
-            "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
-            "<th>Classes</th><th>Appearance</th></tr>"]
+            "<table><tr>%s%s%s%s%s</tr>" %
+            (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"), sth("Appearance"))]
     count = 0
     for res in creature_resrefs(root):
         d = load_cached(utc_path(root, res))
@@ -1688,6 +1749,7 @@ def render_creatures(root, query):
                      esc(name), esc(s["tag"]), esc(s["classes"]),
                      esc(s["appearance"])))
     body.append("</table><p class='note'>%d creatures shown.</p>" % count)
+    body.append(SORT_SCRIPT)
     return page("Creature blueprints (.utc)", "".join(body))
 
 
