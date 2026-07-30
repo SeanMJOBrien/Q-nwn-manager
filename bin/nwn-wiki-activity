@@ -17,6 +17,13 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Windows: a piped stdout/stderr defaults to the legacy console codepage,
+# not UTF-8, so any print() containing a non-ASCII character raises
+# UnicodeEncodeError. See the matching comment in nwn-wiki for details.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 def _load_nwn_wiki():
     """Load nwn-wiki as a Python module via importlib."""

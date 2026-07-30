@@ -44,6 +44,14 @@ import os
 import glob
 import json
 
+# Windows: a piped stdout/stderr (this script is invoked as a subprocess by
+# nwn-manager.ps1 repack) defaults to the legacy console codepage, not
+# UTF-8, so any print() containing a non-ASCII character raises
+# UnicodeEncodeError. See the matching comment in nwn-wiki for details.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # Fields that only ever belong on a *link* struct (StartingList entries and
 # the RepliesList/EntriesList pointers inside nodes), never on a node itself.
 LINK_ONLY_ON_NODE_FAIL = ("IsChild", "Index")

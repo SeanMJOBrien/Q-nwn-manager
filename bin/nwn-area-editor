@@ -51,6 +51,13 @@ import uuid
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Windows: a piped or legacy-codepage stdout/stderr defaults to something
+# other than UTF-8, so any print() containing a non-ASCII character raises
+# UnicodeEncodeError. See the matching comment in nwn-wiki for details.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 # --- Runtime config (set in main) -------------------------------------------
 
 PROJECTS_DIR = None    # multi-project root (None in legacy single-dir mode)

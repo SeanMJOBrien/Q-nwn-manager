@@ -31,6 +31,15 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+# Windows: a piped stdout/stderr (e.g. this script run as a subprocess, as
+# nwn-manager.ps1/nwn-area-editor do) defaults to the legacy console codepage
+# (cp1252 etc.), not UTF-8, so any print() containing a non-ASCII character
+# (arrows, em dashes, ...) raises UnicodeEncodeError. Reconfigure explicitly
+# rather than relying on PYTHONUTF8/PYTHONIOENCODING being set by the caller.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / "wiki_data"
 ASSETS_DIR = SCRIPT_DIR / "wiki_assets"
