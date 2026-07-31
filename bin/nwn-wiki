@@ -15305,8 +15305,17 @@ def main() -> int:
     render_manual_pages(src.parent, out)
 
     if _HAS_ACTIVITY_PAGE:
-        _act_cmd = [sys.executable, str(SCRIPT_DIR / "nwn-wiki-activity"),
-                    "--src", str(src), "--out", str(out)]
+        # Frozen (PyInstaller) builds: sys.executable is our own compiled
+        # nwn-pytools binary, which has no on-disk "nwn-wiki-activity"
+        # sibling to point at - invoke it as a dispatcher subcommand
+        # instead. Unfrozen: sys.executable is the real python3 interpreter,
+        # run the sibling script by path as before.
+        if getattr(sys, "frozen", False):
+            _act_cmd = [sys.executable, "wiki-activity",
+                        "--src", str(src), "--out", str(out)]
+        else:
+            _act_cmd = [sys.executable, str(SCRIPT_DIR / "nwn-wiki-activity"),
+                        "--src", str(src), "--out", str(out)]
         for _d in args.log_dirs:
             _act_cmd += ["--log-dir", str(_d)]
         if args.activity_cache:

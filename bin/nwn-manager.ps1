@@ -57,6 +57,43 @@ foreach ($d in @((Join-Path $HOME '.nimble\bin'), (Join-Path $HOME '.local\bin')
     Add-ToolPath $d
 }
 
+# Locate a compiled nwn-pytools binary (built from bin/_pytools_main.py via
+# build/nwn-pytools.spec) under the same nwn-tools/<platform>/ convention
+# used above for nasher/nwn_gff/nwnsc, so wiki/console/edit-areas/serve and
+# the repack dlg-check gate can run without python3 installed. Empty when
+# none is found -- Invoke-PyTool below falls back to today's `python3
+# <script>` behavior in that case.
+$script:PYTOOLS_BIN = $null
+if ($script:PLAT) {
+    $ptExe = if ($script:PLAT -eq 'win') { 'nwn-pytools.exe' } else { 'nwn-pytools' }
+    $ptRoots = @($env:NWN_TOOLS_DIR, (Join-Path $SCRIPT_DIR '..\nwn-tools'), (Join-Path $SCRIPT_DIR '..\..\nwn-tools')) |
+        Where-Object { $_ }
+    foreach ($r in $ptRoots) {
+        $cand = Join-Path (Join-Path (Join-Path $r $script:PLAT) 'nwn-pytools') $ptExe
+        if (Test-Path -LiteralPath $cand -PathType Leaf) {
+            $script:PYTOOLS_BIN = $cand
+            break
+        }
+    }
+}
+
+# Run a Python-based subcommand: prefer the compiled nwn-pytools binary when
+# found, else fall back to running the real script under python3 (or, for
+# the two dispatcher-only lookups with no standalone script, the dispatcher
+# source file itself). Mirrors bin/nwn-manager's run_pytool().
+function Invoke-PyTool {
+    param([string]$Sub, [string[]]$RestArgs = @())
+    if ($script:PYTOOLS_BIN) {
+        & $script:PYTOOLS_BIN $Sub @RestArgs
+    } elseif ($Sub -eq 'check-dlg-integrity') {
+        & python3 (Join-Path $SCRIPT_DIR 'check-dlg-integrity') @RestArgs
+    } elseif ($Sub -in @('hak-list', 'tlk-name')) {
+        & python3 (Join-Path $SCRIPT_DIR '_pytools_main.py') $Sub @RestArgs
+    } else {
+        & python3 (Join-Path $SCRIPT_DIR "nwn-$Sub") @RestArgs
+    }
+}
+
 function Show-Usage {
     @"
 $PROG -- multi-module manager for NWN1 .mod files (PowerShell port).
@@ -154,6 +191,9 @@ function Invoke-Preflight {
     param([string[]]$Bins)
     $missing = $false
     foreach ($bin in $Bins) {
+        # A compiled nwn-pytools binary makes python3 optional - Invoke-PyTool
+        # already prefers it over `& python3 <script>` at every call site.
+        if ($bin -eq 'python3' -and $script:PYTOOLS_BIN) { continue }
         if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) {
             $hint = switch ($bin) {
                 'nasher' { 'nimble install nasher' }
@@ -183,24 +223,6 @@ function Resolve-FullPath {
         return [System.IO.Path]::GetFullPath($Path)
     }
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Path))
-}
-
-function New-TempPyFile {
-    param([string]$Code)
-    $name = 'nwnmgr_' + [System.IO.Path]::GetRandomFileName().Replace('.', '') + '.py'
-    $path = Join-Path ([System.IO.Path]::GetTempPath()) $name
-    Set-Content -LiteralPath $path -Value $Code -NoNewline
-    return $path
-}
-
-function Invoke-PyInline {
-    param([string]$Code, [string[]]$ScriptArgs = @())
-    $tmp = New-TempPyFile -Code $Code
-    try {
-        & python3 $tmp @ScriptArgs
-    } finally {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    }
 }
 
 # nwn_erf chokes on apostrophes (and is fragile around spaces) in input
@@ -302,18 +324,7 @@ function Get-HakIncludeDirs {
     $hakDir = Join-Path $userdir 'hak'
     if (-not (Test-Path -LiteralPath $hakDir -PathType Container)) { return $out }
 
-    $pyScript = @'
-import json
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    for h in d.get("Mod_HakList", {}).get("value", []):
-        n = h.get("Mod_Hak", {}).get("value", "").strip()
-        if n:
-            print(n)
-except Exception:
-    pass
-'@
-    $haks = @(Invoke-PyInline -Code $pyScript)
+    $haks = @(Invoke-PyTool -Sub 'hak-list' -RestArgs @('unpacked/module.ifo.json'))
     foreach ($h in $haks) {
         if (-not $h) { continue }
         $hak = Join-Path $hakDir "$h.hak"
@@ -368,16 +379,7 @@ function Export-Tlks {
 
     $customName = ''
     if (Test-Path -LiteralPath 'unpacked/module.ifo.json' -PathType Leaf) {
-        $pyScript = @'
-import json
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    v = d.get("Mod_CustomTlk", {}).get("value", "")
-    print(str(v).strip())
-except Exception:
-    pass
-'@
-        $lines = @(Invoke-PyInline -Code $pyScript)
+        $lines = @(Invoke-PyTool -Sub 'tlk-name' -RestArgs @('unpacked/module.ifo.json'))
         if ($lines.Count -gt 0) { $customName = $lines[0] }
     }
     if ($customName) {
@@ -639,9 +641,9 @@ function Invoke-CmdRepack {
         # lists) -- nwn_gff packs them silently but the engine rejects at load.
         if (-not $noSmoke) {
             $dlgScript = Join-Path $SCRIPT_DIR 'check-dlg-integrity'
-            if ((Test-Path -LiteralPath $dlgScript -PathType Leaf) -and (Test-Path -LiteralPath $unpackedDir -PathType Container)) {
+            if (($script:PYTOOLS_BIN -or (Test-Path -LiteralPath $dlgScript -PathType Leaf)) -and (Test-Path -LiteralPath $unpackedDir -PathType Container)) {
                 Write-Host "[$PROG] checking dialog integrity: unpacked/*.dlg.json"
-                $dlgOut = & python3 $dlgScript $unpackedDir
+                $dlgOut = Invoke-PyTool -Sub 'check-dlg-integrity' -RestArgs @($unpackedDir)
                 $dlgExit = $LASTEXITCODE
                 if ($dlgOut) { $dlgOut | ForEach-Object { Write-Host $_ } }
                 if ($dlgExit -ne 0) {
@@ -851,7 +853,7 @@ function Invoke-CmdWiki {
             $tlkArgs.Add('--custom-tlk'); $tlkArgs.Add($custom.FullName)
         }
 
-        & python3 (Join-Path $SCRIPT_DIR 'nwn-wiki') --src unpacked --out $out @($tlkArgs.ToArray()) @rest
+        Invoke-PyTool -Sub 'wiki' -RestArgs (@('--src', 'unpacked', '--out', $out) + @($tlkArgs.ToArray()) + @rest)
         exit $LASTEXITCODE
     } finally {
         Pop-Location
@@ -879,7 +881,11 @@ function Invoke-CmdConsole {
         $projectsDir = Join-Path (Resolve-FullPath (Join-Path $SCRIPT_DIR '..')) 'projects'
     }
     New-Item -ItemType Directory -Path $projectsDir -Force | Out-Null
-    & python3 (Join-Path $SCRIPT_DIR 'nwn-area-editor') --projects-dir $projectsDir @rest
+    Invoke-PyTool -Sub 'area-editor' -RestArgs (@(
+        '--projects-dir', $projectsDir,
+        '--nwn-manager', (Join-Path $SCRIPT_DIR 'nwn-manager.ps1'),
+        '--landing-dir', (Resolve-FullPath (Join-Path $SCRIPT_DIR '..'))
+    ) + @rest)
     exit $LASTEXITCODE
 }
 
@@ -907,7 +913,11 @@ function Invoke-CmdEditAreas {
             }
         }
         $rest = Get-ArgsSlice $RestArgs $i
-        & python3 (Join-Path $SCRIPT_DIR 'nwn-area-editor') --dir $dir @rest
+        Invoke-PyTool -Sub 'area-editor' -RestArgs (@(
+            '--dir', $dir,
+            '--nwn-manager', (Join-Path $SCRIPT_DIR 'nwn-manager.ps1'),
+            '--landing-dir', (Resolve-FullPath (Join-Path $SCRIPT_DIR '..'))
+        ) + @rest)
         exit $LASTEXITCODE
     } finally {
         Pop-Location
@@ -1009,10 +1019,10 @@ function Invoke-CmdServe {
             $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
             # Trigger when: no players currently online AND a logout occurred
             # within the last poll window.
-            & python3 $wikiActivity --check-should-refresh $pollSecs @($logDirArgs.ToArray()) @($cacheArgs.ToArray()) @sinceArgs *> $null
+            Invoke-PyTool -Sub 'wiki-activity' -RestArgs (@('--check-should-refresh', $pollSecs) + @($logDirArgs.ToArray()) + @($cacheArgs.ToArray()) + @sinceArgs) *> $null
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "[$PROG] serve: $now -- no players + recent logout; refreshing activity page"
-                & python3 $wikiActivity --src unpacked --out docs @($logDirArgs.ToArray()) @($cacheArgs.ToArray()) @sinceArgs @($dbDirArgs.ToArray())
+                Invoke-PyTool -Sub 'wiki-activity' -RestArgs (@('--src', 'unpacked', '--out', 'docs') + @($logDirArgs.ToArray()) + @($cacheArgs.ToArray()) + @sinceArgs + @($dbDirArgs.ToArray()))
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "[$PROG] serve: activity page refreshed"
                     if ($autoPublish) {
@@ -1060,7 +1070,7 @@ function Invoke-CmdServe {
                     }
                 }
             } else {
-                & python3 $wikiActivity --check-online @($logDirArgs.ToArray()) @($cacheArgs.ToArray()) @sinceArgs *> $null
+                Invoke-PyTool -Sub 'wiki-activity' -RestArgs (@('--check-online') + @($logDirArgs.ToArray()) + @($cacheArgs.ToArray()) + @sinceArgs) *> $null
                 if ($LASTEXITCODE -eq 0) {
                     Write-Host "[$PROG] serve: $now -- poll: players online"
                 }

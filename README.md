@@ -61,7 +61,8 @@ A Nim toolchain plus two Nim packages must be on `PATH`:
 - `nasher`
 - `nwn_gff`, `nwn_erf` (from the `neverwinter` package) and `nwnsc` (a
   separate, standalone script compiler)
-- `python3` (for `nwn-manager wiki` and `nwn-manager console`)
+- `python3` (for `nwn-manager wiki` and `nwn-manager console`) - **optional**
+  when a compiled `nwn-pytools` binary is present, see below
 
 > **Bundled tools — no install needed.** This repo ships the **full**
 > `nwn-tools/` directory (all three platforms: `linux`, `macos_arm64`, `win`)
@@ -97,6 +98,30 @@ A Nim toolchain plus two Nim packages must be on `PATH`:
 >
 > On macOS, binaries from a `git clone` are **not** Gatekeeper-quarantined, so
 > they run from the terminal without prompts.
+
+### Native binaries (no Python required)
+
+`nwn-manager wiki`/`console`/`edit-areas`/`serve`, plus the `repack` dialog-
+integrity gate and the `init`/`repack` hak/TLK lookups, all run `python3`
+under the hood by default. If a compiled `nwn-pytools`/`nwn-pytools.exe`
+binary is present at `nwn-tools/<platform>/nwn-pytools/` (same per-platform
+layout and discovery order as `nasher`/`nwn_gff`/`nwnsc` above), both
+`bin/nwn-manager` and `bin/nwn-manager.ps1` use it instead - `python3` is
+never invoked, and the `-h` preflight check for it is skipped. Falls back to
+today's `python3 <script>` behavior automatically when no compiled binary is
+found, so this is a pure add-on: nothing changes if you don't have one.
+
+Built from `bin/_pytools_main.py` (a small dispatcher wrapping
+`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`) via
+`build/nwn-pytools.spec` (PyInstaller `--onedir`). See
+`.github/workflows/build-pytools.yml` for the per-platform build; run it
+manually from the Actions tab, or build locally:
+
+```sh
+pip install pyinstaller
+pyinstaller build/nwn-pytools.spec
+cp -a dist/nwn-pytools nwn-tools/<platform>/nwn-pytools
+```
 
 ### Install on an immutable Fedora distro (Bazzite, Silverblue, etc.)
 

@@ -40,6 +40,63 @@ done
 export PATH
 unset _root _plat _d 2>/dev/null || true
 
+# Locate a compiled nwn-pytools binary (built from bin/_pytools_main.py via
+# build/nwn-pytools.spec) under the same nwn-tools/<platform>/ convention
+# used above for nasher/nwn_gff/nwnsc, so wiki/console/edit-areas/serve and
+# the repack dlg-check gate can run without python3 installed. Empty when
+# none is found - run_pytool()/run_pytool_exec() below fall back to today's
+# `python3 <script>` behavior in that case.
+PYTOOLS_BIN=""
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _pt_plat=macos_arm64; _pt_exe="" ;;
+  Linux)  _pt_plat=linux; _pt_exe="" ;;
+  MINGW*|MSYS*|CYGWIN*) _pt_plat=win; _pt_exe=".exe" ;;
+  *)      _pt_plat=""; _pt_exe="" ;;
+esac
+if [[ -n ${_pt_plat:-} ]]; then
+  for _pt_root in "${NWN_TOOLS_DIR:-}" "$SCRIPT_DIR/../nwn-tools" "$SCRIPT_DIR/../../nwn-tools"; do
+    [[ -n $_pt_root ]] || continue
+    _pt_cand="$_pt_root/$_pt_plat/nwn-pytools/nwn-pytools$_pt_exe"
+    if [[ -x $_pt_cand ]]; then
+      PYTOOLS_BIN=$_pt_cand
+      break
+    fi
+  done
+fi
+export PYTOOLS_BIN
+unset _pt_plat _pt_root _pt_cand _pt_exe 2>/dev/null || true
+
+# Run a Python-based subcommand in the foreground, preserving stdout/
+# stderr/exit code: prefer the compiled nwn-pytools binary when found, else
+# fall back to running the real script under python3 (or, for the two
+# dispatcher-only lookups with no standalone script, under the dispatcher
+# source file itself). $1 = subcommand name (wiki/area-editor/wiki-activity/
+# check-dlg-integrity/hak-list/tlk-name); remaining args passed through.
+run_pytool() {
+  local sub=$1; shift
+  if [[ -n $PYTOOLS_BIN ]]; then
+    "$PYTOOLS_BIN" "$sub" "$@"
+  elif [[ $sub == check-dlg-integrity ]]; then
+    "$SCRIPT_DIR/check-dlg-integrity" "$@"
+  elif [[ $sub == hak-list || $sub == tlk-name ]]; then
+    python3 "$SCRIPT_DIR/_pytools_main.py" "$sub" "$@"
+  else
+    python3 "$SCRIPT_DIR/nwn-$sub" "$@"
+  fi
+}
+
+# Same as run_pytool but tail-calls via exec (process replacement) instead
+# of running in the foreground - for cmd_wiki/cmd_console/cmd_edit_areas,
+# which only ever invoke one of the nwn-$sub-named scripts.
+run_pytool_exec() {
+  local sub=$1; shift
+  if [[ -n $PYTOOLS_BIN ]]; then
+    exec "$PYTOOLS_BIN" "$sub" "$@"
+  else
+    exec python3 "$SCRIPT_DIR/nwn-$sub" "$@"
+  fi
+}
+
 usage() {
   cat <<EOF
 $PROG — multi-module manager for NWN1 .mod files.
@@ -259,15 +316,7 @@ extract_hak_includes() {
   [[ -d "$userdir/hak" ]] || return 0
 
   local haks
-  haks=$(python3 -c '
-import json, sys
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    for h in d.get("Mod_HakList", {}).get("value", []):
-        n = h.get("Mod_Hak", {}).get("value", "").strip()
-        if n: print(n)
-except Exception:
-    pass') || return 0
+  haks=$(run_pytool hak-list "unpacked/module.ifo.json") || return 0
 
   local h hak dir
   while IFS= read -r h; do
@@ -315,14 +364,7 @@ extract_tlks() {
 
   local custom_name=""
   if [[ -f unpacked/module.ifo.json ]]; then
-    custom_name=$(python3 -c '
-import json, sys
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    v = d.get("Mod_CustomTlk", {}).get("value", "")
-    print(str(v).strip())
-except Exception:
-    pass' 2>/dev/null || true)
+    custom_name=$(run_pytool tlk-name "unpacked/module.ifo.json" 2>/dev/null || true)
   fi
   if [[ -n $custom_name ]]; then
     local custom=""
@@ -535,7 +577,7 @@ cmd_repack() {
   if [[ $no_smoke -eq 0 && -x "$SCRIPT_DIR/check-dlg-integrity" && -d "$root/unpacked" ]]; then
     echo "[$PROG] checking dialog integrity: unpacked/*.dlg.json"
     local dlg_out dlg_exit
-    dlg_out=$("$SCRIPT_DIR/check-dlg-integrity" "$root/unpacked" 2>&1) && dlg_exit=0 || dlg_exit=$?
+    dlg_out=$(run_pytool check-dlg-integrity "$root/unpacked" 2>&1) && dlg_exit=0 || dlg_exit=$?
     [[ -n $dlg_out ]] && echo "$dlg_out"
     if (( dlg_exit != 0 )); then
       echo "[$PROG] dialog-integrity check FAILED — aborting repack (nothing built or installed)" >&2
@@ -812,7 +854,7 @@ cmd_wiki() {
   # empty-string argument when the array is empty instead of zero arguments
   # - use the ${arr[@]+"${arr[@]}"} form, already used for $pass_through
   # above, which is correct in both cases.)
-  exec python3 "$SCRIPT_DIR/nwn-wiki" --src unpacked --out "$out" \
+  run_pytool_exec wiki --src unpacked --out "$out" \
     ${tlk_args[@]+"${tlk_args[@]}"} "$@"
 }
 
@@ -834,7 +876,9 @@ cmd_console() {
     projects_dir=$(cd "$SCRIPT_DIR/.." && pwd)/projects
   fi
   mkdir -p "$projects_dir"
-  exec python3 "$SCRIPT_DIR/nwn-area-editor" --projects-dir "$projects_dir" "$@"
+  run_pytool_exec area-editor --projects-dir "$projects_dir" \
+    --nwn-manager "$SCRIPT_DIR/nwn-manager" \
+    --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
 cmd_edit_areas() {
@@ -856,7 +900,9 @@ cmd_edit_areas() {
     esac
   done
 
-  exec python3 "$SCRIPT_DIR/nwn-area-editor" --dir "$dir" "$@"
+  run_pytool_exec area-editor --dir "$dir" \
+    --nwn-manager "$SCRIPT_DIR/nwn-manager" \
+    --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
 cmd_serve() {
@@ -958,10 +1004,10 @@ cmd_serve() {
     # the last poll window.  This fires at most once per poll period per
     # session end, naturally self-clears when the window expires, and
     # survives monitor restarts without any saved state.
-    if python3 "$wiki_activity" --check-should-refresh "$poll_secs" \
+    if run_pytool wiki-activity --check-should-refresh "$poll_secs" \
         "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" 2>/dev/null; then
       echo "[$PROG] serve: $_now — no players + recent logout; refreshing activity page"
-      if python3 "$wiki_activity" \
+      if run_pytool wiki-activity \
           --src unpacked --out docs \
           "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" ${db_dir_args[@]+"${db_dir_args[@]}"}; then
         echo "[$PROG] serve: activity page refreshed"
@@ -996,7 +1042,7 @@ cmd_serve() {
           echo "[$PROG] serve: warn: backup command failed (rc=$?)" >&2
         fi
       fi
-    elif python3 "$wiki_activity" --check-online \
+    elif run_pytool wiki-activity --check-online \
         "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" 2>/dev/null; then
       echo "[$PROG] serve: $_now — poll: players online"
     fi

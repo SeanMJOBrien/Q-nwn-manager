@@ -6,3 +6,8 @@
 *.erf
 *.hak
 __pycache__/
+
+# PyInstaller scratch workdir for build/nwn-pytools.spec (the .spec file
+# itself is committed; its output goes to nwn-tools/<platform>/nwn-pytools/,
+# not here).
+/build/nwn-pytools/
