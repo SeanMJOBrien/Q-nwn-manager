@@ -1,0 +1,2667 @@
+#!/usr/bin/env python3
+"""nwn-console - stdlib-only multi-project web console for NWN:EE modules.
+
+Home page (dashboard) lets you:
+  - UPLOAD a .mod (+ optional loose files) -> ingested into a new project
+    (its own subdirectory under --projects-dir) via `nwn-manager init`
+  - per project: REBUILD the project-specific wiki (`nwn-manager wiki`)
+  - per project: BUILD & DOWNLOAD the packed .mod (`nwn-manager repack`)
+  - per project: bulk-edit areas (event scripts, lighting/fog, tags/resrefs)
+
+Each project is a nasher project dir (nasher.cfg + unpacked/*.are.json ...),
+managed, viewed, and built independently. Long operations (build ~minutes,
+wiki ~30s, ingest) run as background jobs with a live-progress page.
+
+This is the JSON-native evolution of the old nwn-area-editor: it reads/writes
+the GFF-as-JSON documents nwn-manager keeps under version control
+(<resref>.are.json, produced by `nwn-manager unpack` / nwn_gff -k json), so no
+per-file nwn_gff round-trips are needed.
+
+Modes:
+  Multi-project (console):  --projects-dir DIR   (dashboard at /, /p/<slug>/...)
+  Legacy single-dir:        --dir DIR            (area editor only, no prefix)
+
+Safety:
+  - binds 127.0.0.1 only (use --host to override deliberately)
+  - first edit of any file writes a one-time <file>.json.bak sibling backup
+  - only submitted, non-blank fields are changed; everything else round-trips
+    byte-identically (plain JSON load/dump, no GFF conversion involved)
+  - static wiki + download file serving is path-traversal guarded
+
+Usage:
+  nwn-manager console [--projects-dir DIR] [--port 8341] [--url-prefix /qedit]
+  python3 nwn-area-editor --dir /path/to/unpacked   # legacy single-project
+"""
+
+import argparse
+import glob
+import html
+import json
+import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import uuid
+from collections import defaultdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# Windows: a piped or legacy-codepage stdout/stderr defaults to something
+# other than UTF-8, so any print() containing a non-ASCII character raises
+# UnicodeEncodeError. See the matching comment in nwn-wiki for details.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+# --- Runtime config (set in main) -------------------------------------------
+
+PROJECTS_DIR = None    # multi-project root (None in legacy single-dir mode)
+SINGLE_MODE = False     # True when launched with --dir instead of --projects-dir
+SINGLE_PROJECT = None   # the implicit Project in single-dir mode
+NWN_MANAGER = None      # argv prefix for the nwn-manager wrapper (for init/unpack/wiki/repack)
+LANDING_DIR = None      # where start.html lives and dropped .mod files are scanned
+SERVER = None           # the ThreadingHTTPServer (for the /shutdown "Stop" button)
+
+# Per-request context (ThreadingHTTPServer gives one thread per request).
+_req = threading.local()
+
+
+def _slug():
+    return getattr(_req, "slug", None)
+
+
+def _proxy():
+    return getattr(_req, "proxy", "")
+
+
+def purl(path=""):
+    """Absolute in-app URL for the current project (or plain, in single mode)."""
+    base = _proxy()
+    if _slug():
+        base += "/p/" + _slug()
+    return (base + path) or "/"
+
+
+def gurl(path=""):
+    """Absolute in-app URL at the console root (dashboard/jobs), proxy-aware."""
+    return (_proxy() + path) or "/"
+
+
+# --- JSON GFF plumbing -------------------------------------------------------
+
+# Cache: path -> (mtime, data). Avoids a reparse per file per page load.
+_CACHE = {}
+
+
+def json_load(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def json_save(path, data):
+    """Write GFF-as-JSON, with one-time .bak backup and atomic replace."""
+    bak = path + ".bak"
+    if os.path.exists(path) and not os.path.exists(bak):
+        shutil.copy2(path, bak)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def load_cached(path):
+    mtime = os.path.getmtime(path)
+    hit = _CACHE.get(path)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    data = json_load(path)
+    _CACHE[path] = (mtime, data)
+    return data
+
+
+def invalidate(path):
+    _CACHE.pop(path, None)
+
+
+# --- GFF field helpers (same shape as nwn_web_editor.py) --------------------
+
+def getv(d, name, default=None):
+    f = d.get(name)
+    return f["value"] if isinstance(f, dict) and "value" in f else default
+
+
+def setv(d, name, value, gff_type=None):
+    """Set a field, preserving its existing declared type when present."""
+    if name in d and isinstance(d[name], dict) and "type" in d[name]:
+        d[name]["value"] = value
+    elif gff_type:
+        d[name] = {"type": gff_type, "value": value}
+    else:
+        raise KeyError("field %r absent and no type given" % name)
+
+
+def loc_get(d, name):
+    """First inline text of a CExoLocString ('' if TLK-only or absent)."""
+    v = getv(d, name)
+    if isinstance(v, dict):
+        for k, txt in v.items():
+            if k != "id" and isinstance(txt, str):
+                return txt
+    return ""
+
+
+def loc_set(d, name, text):
+    f = d.get(name)
+    if not (isinstance(f, dict) and isinstance(f.get("value"), dict)):
+        d[name] = {"type": "cexolocstring", "value": {}}
+        f = d[name]
+    f["value"]["0"] = text
+
+
+def dword_to_hex(v):
+    """NWN color dword (0xBBGGRR) -> '#rrggbb'."""
+    return "#%02x%02x%02x" % (v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF)
+
+
+def hex_to_dword(s):
+    s = s.lstrip("#")
+    r, g, b = int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    return r | (g << 8) | (b << 16)
+
+
+# --- HTML helpers -----------------------------------------------------------
+
+def esc(s):
+    return html.escape(str(s), quote=True)
+
+
+CSS = """
+body{font-family:system-ui,sans-serif;margin:1.5em;background:#1e1f24;color:#d8d9de}
+a{color:#7ab3ff} table{border-collapse:collapse;margin:1em 0}
+td,th{border:1px solid #444;padding:.25em .6em;text-align:left}
+th{background:#2a2b31} tr:nth-child(even){background:#25262c}
+input[type=text],input[type=number],input[type=file],select{background:#2a2b31;
+ color:#d8d9de;border:1px solid #555;padding:.2em .4em}
+input[type=submit],button{background:#39507a;color:#fff;border:0;
+ padding:.4em 1em;cursor:pointer;margin:.2em}
+.nav a{margin-right:1.2em} .note{color:#9a9;font-style:italic}
+.nav{overflow:hidden} .nav .stop-console{display:inline;float:right;margin:0}
+.nav .stop-console button{background:#7a3939;padding:.25em .8em;margin:0}
+.warn{color:#e6a23c} .err{color:#f66} .ok{color:#8c6}
+fieldset{border:1px solid #555;margin:.8em 0} legend{padding:0 .5em}
+.card{border:1px solid #444;background:#25262c;border-radius:6px;padding:.8em 1.1em;margin:.8em 0}
+.grid{display:flex;flex-wrap:wrap;gap:1em} .grid .card{flex:1 1 22em}
+.actions form{display:inline-block} .pill{font-size:.85em;padding:.1em .5em;
+ border-radius:1em;background:#2a2b31;margin-right:.4em}
+pre.log{background:#111318;color:#c6d0d9;padding:.8em;border-radius:6px;
+ max-height:24em;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.phase{font-weight:bold} h2{margin-top:1.4em}
+.sticky-toolbar{position:sticky;top:0;z-index:3;background:#1e1f24;
+ padding:.5em 0;border-bottom:1px solid #444}
+.sticky-toolbar .selected-actions{margin-top:.3em}
+table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
+.cancel-link{display:inline-block;padding:.4em 1em;margin:.2em;border:1px solid #555;
+ border-radius:3px;color:#d8d9de;text-decoration:none}
+.cancel-link:hover{background:#2a2b31}
+th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:#333}
+.sort-arrow{font-size:.8em}
+"""
+
+NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
+WIKI_SHELL = ""  # nwn-wiki embed-shell.html template ({{TITLE}}/{{BODY}}/{{ROOT}})
+WIKI_BASE = ""   # public base URL of the wiki the shell's assets live under
+
+# Supplemental styles for editor widgets when embedded in the wiki shell -
+# theme-neutral (no fixed colors) since the wiki's stylesheet sets the look.
+SHELL_CSS = """
+fieldset{border:1px solid #8886;margin:.8em 0;padding:.5em 1em}
+legend{padding:0 .5em;font-weight:bold}
+.note{opacity:.7;font-style:italic} .warn{color:#b8860b}
+.err{color:#c0392b} .ok{color:#2e8b57}
+.nav a{margin-right:1.2em}
+.card{border:1px solid #8886;border-radius:6px;padding:.8em 1.1em;margin:.8em 0}
+.grid{display:flex;flex-wrap:wrap;gap:1em} .grid .card{flex:1 1 22em}
+pre.log{background:#0003;padding:.8em;border-radius:6px;max-height:24em;
+ overflow:auto;white-space:pre-wrap;word-break:break-word}
+input[type=submit],button{padding:.35em 1em;cursor:pointer;margin:.2em}
+.sticky-toolbar{position:sticky;top:0;z-index:3;background:Canvas;
+ padding:.5em 0;border-bottom:1px solid #8886}
+.sticky-toolbar .selected-actions{margin-top:.3em}
+table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
+.cancel-link{display:inline-block;padding:.35em 1em;margin:.2em;border:1px solid #8886;
+ border-radius:3px;text-decoration:none}
+th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:Canvas}
+.sort-arrow{font-size:.8em}
+"""
+
+
+def _nav():
+    extra = "".join('<a href="%s">%s</a>' % (esc(u), esc(l))
+                    for l, u in NAV_EXTRA)
+    proj = getattr(_req, "project", None)
+    links = []
+    if SINGLE_MODE:
+        links.append("<a href='%s'>Areas</a>" % purl("/areas"))
+        if proj and proj.creature_count():
+            links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+        if proj and proj.has_module():
+            links.append("<a href='%s'>Module</a>" % purl("/module"))
+        links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
+    else:
+        links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
+        if _slug():
+            links.append("<a href='%s'>%s</a>" % (purl("/"), esc(_slug())))
+            links.append("<a href='%s'>Areas</a>" % purl("/areas"))
+            links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+            links.append("<a href='%s'>Module</a>" % purl("/module"))
+            links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
+            if _has_wiki_current():
+                links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
+                links.append("<a href='%s'>Map</a>" % purl("/wiki/map/"))
+    stop = ("<form method='post' action='%s' class='stop-console' "
+            "onsubmit=\"return confirm('Stop the console server?')\">"
+            "<button type='submit'>Stop console</button></form>" % gurl("/shutdown"))
+    return "<div class='nav'>%s%s%s</div>" % ("".join(links), extra, stop)
+
+
+def _has_wiki_current():
+    proj = getattr(_req, "project", None)
+    return bool(proj and proj.has_wiki())
+
+
+def page(title, body, head_extra=""):
+    nav = _nav()
+    if WIKI_SHELL:
+        inner = ("<style>%s</style>%s<h1>%s</h1>%s"
+                 % (SHELL_CSS, nav, esc(title), body))
+        return (WIKI_SHELL.replace("{{ROOT}}", WIKI_BASE)
+                .replace("{{TITLE}}", esc(title))
+                .replace("{{BODY}}", inner))
+    return ("<!doctype html><html><head><meta charset='utf-8'><title>%s</title>"
+            "%s<style>%s</style></head><body>%s"
+            "<h1>%s</h1>%s</body></html>" % (esc(title), head_extra, CSS, nav,
+                                             esc(title), body))
+
+
+def hidden_resrefs(resrefs):
+    return "".join("<input type='hidden' name='res' value='%s'>" % esc(r)
+                   for r in resrefs)
+
+
+# --- Client-side column sorting ---------------------------------------------
+# One tiny reusable sorter shared by every table page (Areas, Creatures,
+# Remove objects): click a <th class='sortable'> to sort that table by its
+# column, click again to reverse. Pure client-side (no round trip) so it
+# doesn't disturb in-progress checkbox selections or filter state.
+#
+# A row tagged class='qnm-detail' is kept attached to the nearest preceding
+# non-detail row and moves with it - this is what keeps a creature/placeable's
+# nested equipped/carried rows under their parent row on the Remove objects
+# page instead of scattering them once sorted.
+SORT_SCRIPT = """
+<script>
+function qnmSortTable(th){
+  var table = th.closest('table');
+  var col = Array.prototype.indexOf.call(th.parentNode.children, th);
+  var groups = [];
+  Array.prototype.slice.call(table.rows, 1).forEach(function(r){
+    if (r.classList.contains('qnm-detail') && groups.length) {
+      groups[groups.length - 1].push(r);
+    } else {
+      groups.push([r]);
+    }
+  });
+  if (!groups.length) return;
+  var body = groups[0][0].parentNode;
+  var asc = th.getAttribute('data-dir') !== 'asc';
+  groups.sort(function(ga, gb){
+    var ca = ga[0].cells[col], cb = gb[0].cells[col];
+    var av = (ca.getAttribute('data-sort') || ca.textContent).trim().toLowerCase();
+    var bv = (cb.getAttribute('data-sort') || cb.textContent).trim().toLowerCase();
+    if (av < bv) return asc ? -1 : 1;
+    if (av > bv) return asc ? 1 : -1;
+    return 0;
+  });
+  groups.forEach(function(g){ g.forEach(function(r){ body.appendChild(r); }); });
+  Array.prototype.forEach.call(th.parentNode.children, function(h){
+    h.removeAttribute('data-dir');
+    var a = h.querySelector('.sort-arrow'); if (a) a.textContent = '';
+  });
+  th.setAttribute('data-dir', asc ? 'asc' : 'desc');
+  var arrow = th.querySelector('.sort-arrow');
+  if (arrow) arrow.textContent = asc ? ' \\u25b2' : ' \\u25bc';
+}
+</script>
+"""
+
+
+def sth(label):
+    """Sortable <th> - click to sort its table by this column, client-side."""
+    return ("<th class='sortable' onclick='qnmSortTable(this)'>%s"
+            "<span class='sort-arrow'></span></th>" % esc(label))
+
+
+# --- Project model ----------------------------------------------------------
+
+def sanitize_slug(name):
+    return re.sub(r"[^a-z0-9_]+", "_", (name or "").lower()).strip("_")[:48]
+
+
+def safe_basename(name):
+    return os.path.basename((name or "").replace("\\", "/")).strip() or "file"
+
+
+class Project:
+    def __init__(self, root, unpacked=None, git_root=None, gic_root=None):
+        self.root = os.path.abspath(root)
+        self.slug = os.path.basename(self.root)
+        self.unpacked = (os.path.abspath(unpacked) if unpacked
+                         else os.path.join(self.root, "unpacked"))
+        self.git_root = os.path.abspath(git_root) if git_root else self.unpacked
+        self.gic_root = os.path.abspath(gic_root) if gic_root else self.unpacked
+
+    @property
+    def docs(self):
+        return os.path.join(self.root, "docs")
+
+    def has_unpacked(self):
+        return os.path.isdir(self.unpacked)
+
+    def has_wiki(self):
+        return os.path.isfile(os.path.join(self.docs, "index.html"))
+
+    def area_count(self):
+        if not self.has_unpacked():
+            return 0
+        return len(glob.glob(os.path.join(self.unpacked, "*.are.json")))
+
+    def creature_count(self):
+        if not self.has_unpacked():
+            return 0
+        return len(glob.glob(os.path.join(self.unpacked, "*.utc.json")))
+
+    def has_module(self):
+        return os.path.isfile(os.path.join(self.unpacked, "module.ifo.json"))
+
+    def built_mod_path(self):
+        cands = (glob.glob(os.path.join(self.root, "*.mod"))
+                 + glob.glob(os.path.join(self.root, "dist", "*.mod")))
+        return max(cands, key=os.path.getmtime) if cands else None
+
+    def source_mod(self):
+        p = os.path.join(self.root, ".nasher", "source")
+        if os.path.isfile(p):
+            try:
+                return open(p, encoding="utf-8").read().strip()
+            except OSError:
+                return None
+        return None
+
+
+def is_project_dir(d):
+    return os.path.isdir(d) and (
+        os.path.isfile(os.path.join(d, "nasher.cfg"))
+        or os.path.isdir(os.path.join(d, "unpacked")))
+
+
+def find_project(slug):
+    slug = sanitize_slug(slug)
+    if not slug or SINGLE_MODE or not PROJECTS_DIR:
+        return None
+    d = os.path.join(PROJECTS_DIR, slug)
+    return Project(d) if is_project_dir(d) else None
+
+
+def list_projects():
+    if not PROJECTS_DIR or not os.path.isdir(PROJECTS_DIR):
+        return []
+    out = []
+    for name in sorted(os.listdir(PROJECTS_DIR)):
+        d = os.path.join(PROJECTS_DIR, name)
+        if is_project_dir(d):
+            out.append(Project(d))
+    return out
+
+
+# --- Background jobs ---------------------------------------------------------
+
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+
+
+class Job:
+    def __init__(self, title, argv, cwd=None, kind=None, slug=None,
+                 on_success=None):
+        self.id = uuid.uuid4().hex[:12]
+        self.title = title
+        self.argv = argv
+        self.cwd = cwd
+        self.kind = kind          # ingest | wiki | build
+        self.slug = slug
+        self.on_success = on_success
+        self.state = "running"    # running | ok | failed
+        self.phase = "starting"
+        self.lines = []
+        self.built = None
+        self.started = time.time()
+        self.ended = None
+
+    def add(self, line):
+        self.lines.append(line)
+        if len(self.lines) > 800:
+            del self.lines[:len(self.lines) - 800]
+
+
+def _parse_phase(job, line):
+    if re.match(r"^Packing ", line):
+        job.phase = "packing"
+    elif re.match(r"^Compiling ", line):
+        m = re.match(r"^Compiling (\d+)", line)
+        job.phase = "compiling %s scripts" % (m.group(1) if m else "?")
+    elif re.match(r"^Updating ", line) and job.phase in ("starting", "converting"):
+        job.phase = "converting"
+    elif line.startswith("[nwn-manager]"):
+        msg = line.split("]", 1)[1].strip()
+        if msg:
+            job.phase = msg[:100]
+    m = re.search(r"\[nwn-manager\] built: (.+)$", line)
+    if m:
+        job.built = m.group(1).strip()
+
+
+def _run_job(job):
+    try:
+        # Line-buffer the child's stdout when possible so phase lines show up
+        # live instead of all at once at process exit (the child block-buffers
+        # its pipe because stdout is not a TTY).
+        argv = job.argv
+        if shutil.which("stdbuf"):
+            argv = ["stdbuf", "-oL", "-eL"] + list(job.argv)
+        proc = subprocess.Popen(
+            argv, cwd=job.cwd, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1, env=os.environ)
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            job.add(line)
+            _parse_phase(job, line)
+        proc.wait()
+        if proc.returncode != 0:
+            job.state = "failed"
+            job.phase = "failed (exit %d)" % proc.returncode
+            job.ended = time.time()
+            return
+        if job.on_success:
+            job.on_success(job)
+        job.state = "ok"
+        job.phase = "done"
+        job.ended = time.time()
+    except Exception as exc:  # noqa: BLE001 - surface any launch failure
+        job.add("ERROR: %s" % exc)
+        job.state = "failed"
+        job.phase = "error"
+        job.ended = time.time()
+
+
+def start_job(job):
+    with _JOBS_LOCK:
+        _JOBS[job.id] = job
+    threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+    return job
+
+
+def get_job(jid):
+    with _JOBS_LOCK:
+        return _JOBS.get(jid)
+
+
+# --- Multipart parsing (stdlib only; `cgi` is gone in Python 3.13+) ---------
+
+def parse_multipart(headers, rfile):
+    """Return (fields, files): name -> [str] and name -> [(filename, bytes)]."""
+    ctype = headers.get("Content-Type", "")
+    fields, files = {}, {}
+    if "multipart/form-data" not in ctype:
+        return fields, files
+    m = re.search(r"boundary=([^;]+)", ctype)
+    if not m:
+        return fields, files
+    boundary = m.group(1).strip().strip('"')
+    length = int(headers.get("Content-Length", 0))
+    body = rfile.read(length)
+    delim = b"--" + boundary.encode()
+    for part in body.split(delim):
+        if part in (b"", b"--", b"--\r\n", b"\r\n"):
+            continue
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
+        if b"\r\n\r\n" not in part:
+            continue
+        raw_headers, _, data = part.partition(b"\r\n\r\n")
+        hlines = raw_headers.decode("utf-8", "replace").split("\r\n")
+        disp = next((h for h in hlines
+                     if h.lower().startswith("content-disposition")), "")
+        nm = re.search(r'name="([^"]*)"', disp)
+        if not nm:
+            continue
+        name = nm.group(1)
+        fn = re.search(r'filename="([^"]*)"', disp)
+        if fn is not None:
+            files.setdefault(name, []).append((fn.group(1), data))
+        else:
+            fields.setdefault(name, []).append(
+                data.decode("utf-8", "replace"))
+    return fields, files
+
+
+# --- Area logic -------------------------------------------------------------
+
+AREA_SCRIPT_FIELDS = ["OnEnter", "OnExit", "OnHeartbeat", "OnUserDefined"]
+LIGHT_NUM_FIELDS = [
+    ("SunFogAmount", "byte", "0-15"),
+    ("MoonFogAmount", "byte", "0-15"),
+    ("FogClipDist", "float", "e.g. 45.0"),
+    ("DayNightCycle", "byte", "0=static 1=cycle"),
+    ("IsNight", "byte", "0/1 (when static)"),
+    ("LightingScheme", "byte", "environment preset row"),
+    ("ShadowOpacity", "byte", "0-100"),
+    ("SunShadows", "byte", "0/1"),
+    ("MoonShadows", "byte", "0/1"),
+    ("WindPower", "int", "0-2"),
+]
+LIGHT_COLOR_FIELDS = ["SunAmbientColor", "SunDiffuseColor", "SunFogColor",
+                      "MoonAmbientColor", "MoonDiffuseColor", "MoonFogColor"]
+# (field, gff type, hint) - all are ambientmusic.2da row indices except MusicDelay
+MUSIC_FIELDS = [
+    ("MusicDay", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicNight", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
+    ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
+]
+# Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
+# sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
+AREA_FLAG_INTERIOR = 1
+AREA_FLAG_UNDERGROUND = 2
+AREA_FLAG_NATURAL = 4
+
+# Stock NWN1 tileset resrefs -> human-readable names (from bin/nwn-wiki,
+# reused verbatim). Covers only stock tilesets; haks (e.g. CEP) add custom
+# ones not in this table, which correctly fall back to the raw resref.
+TILESETS = {
+    "tcn01": "City Exterior 1",
+    "tcn02": "City Exterior 2",
+    "tdc01": "Castle Interior 1",
+    "tdc02": "Castle Interior 2",
+    "tde01": "Castle Interior, Illuminated",
+    "tdm01": "Mines and Caverns",
+    "tdr01": "Rural",
+    "tds01": "Sewers",
+    "tib01": "Beholder Caves",
+    "tic01": "City Interior",
+    "til01": "Lizardfolk Interior",
+    "tin01": "Crypt",
+    "tni01": "Mines, Lower",
+    "tno01": "Forest",
+    "ttd01": "Desert",
+    "tte01": "Forest, Drow",
+    "ttf01": "Frozen Wastes",
+    "ttp01": "Microset",
+    "ttr01": "Rural Winter",
+    "tts01": "Snow",
+    "ttu01": "Underdark",
+    "ttz01": "Mountains",
+    "twc01": "Castle Exterior, Rural",
+}
+
+
+def tileset_name(resref):
+    if not resref:
+        return ""
+    return TILESETS.get(resref.lower(), resref)
+
+
+def are_path(root, res):
+    return os.path.join(root, res + ".are.json")
+
+
+def git_path(root, res):
+    return os.path.join(root, res + ".git.json")
+
+
+def area_resrefs(root):
+    return sorted(f[:-len(".are.json")] for f in os.listdir(root)
+                  if f.endswith(".are.json"))
+
+
+def area_type_label(flags):
+    parts = []
+    if flags & AREA_FLAG_NATURAL:
+        parts.append("Outside")
+    if flags & AREA_FLAG_INTERIOR:
+        parts.append("Interior")
+    if flags & AREA_FLAG_UNDERGROUND:
+        parts.append("Underground")
+    return ", ".join(parts) if parts else "(unset)"
+
+
+def area_row(root, res):
+    d = load_cached(are_path(root, res))
+    return {
+        "res": res,
+        "name": loc_get(d, "Name"),
+        "tag": getv(d, "Tag", ""),
+        "tileset": getv(d, "Tileset", ""),
+        "flags": getv(d, "Flags", 0),
+        "scripts": {f: getv(d, f, "") for f in AREA_SCRIPT_FIELDS},
+    }
+
+
+def render_areas(root, query):
+    q = (query.get("q", [""])[0]).lower()
+    tileset = query.get("tileset", [""])[0]
+    f_outside = query.get("outside", [""])[0] == "1"
+    f_interior = query.get("interior", [""])[0] == "1"
+    f_underground = query.get("underground", [""])[0] == "1"
+    rows = [area_row(root, r) for r in area_resrefs(root)]
+    tilesets = sorted({r["tileset"] for r in rows})
+    if q:
+        rows = [r for r in rows if q in r["res"].lower()
+                or q in r["name"].lower() or q in r["tag"].lower()]
+    if tileset:
+        rows = [r for r in rows if r["tileset"] == tileset]
+    if f_outside:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_NATURAL]
+    if f_interior:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_INTERIOR]
+    if f_underground:
+        rows = [r for r in rows if r["flags"] & AREA_FLAG_UNDERGROUND]
+    opts = "".join("<option value='%s'%s>%s</option>" %
+                   (esc(t), " selected" if t == tileset else "",
+                    esc(tileset_name(t) if t else "(any)"))
+                   for t in [""] + tilesets)
+
+    def cb(name, label, checked):
+        return ("<label><input type='checkbox' name='%s' value='1'%s> %s</label>" %
+                (name, " checked" if checked else "", label))
+    filt = ("<form method='get'>Filter: <input type='text' name='q' value='%s'> "
+            "Tileset: <select name='tileset'>%s</select> "
+            "Type: %s %s %s "
+            "<input type='submit' value='Apply filter'></form>"
+            "<p class='note'>Type checkboxes narrow the list (all checked "
+            "boxes must match); an area can be more than one type "
+            "(e.g. an underground cave interior).</p>" %
+            (esc(q), opts,
+             cb("outside", "Outside", f_outside),
+             cb("interior", "Interior", f_interior),
+             cb("underground", "Underground", f_underground)))
+    # The filter form and "With selected" buttons live in a sticky toolbar
+    # pinned above the scrolling table; the buttons use form='areasSelect' to
+    # submit the checkbox-selection form below despite being outside it in
+    # the DOM (position:sticky can't span the toolbar + table as one block,
+    # since the table body needs to scroll underneath both).
+    body = [
+        "<div class='sticky-toolbar' id='areasToolbar'>", filt,
+        "<div class='selected-actions'>With selected: "
+        "<button form='areasSelect' name='action' value='scripts'>Edit scripts</button>"
+        "<button form='areasSelect' name='action' value='lighting'>Edit lighting/fog</button>"
+        "<button form='areasSelect' name='action' value='music'>Edit music</button>"
+        "<button form='areasSelect' name='action' value='tags'>Edit tags</button>"
+        "<button form='areasSelect' name='action' value='remove_objects'>Remove objects</button>"
+        "</div></div>",
+        "<form id='areasSelect' method='post' action='%s'>" % purl("/areas/select"),
+        "<table class='areas'><thead><tr><th><input type='checkbox' "
+        "onclick=\"document.querySelectorAll('input[name=res]')"
+        ".forEach(c=>c.checked=this.checked)\"></th>"
+        + sth("ResRef") + sth("Name") + sth("Tag") + sth("Tileset") + sth("Type")
+        + sth("OnEnter") + sth("OnExit") + sth("OnHeartbeat") + sth("OnUserDefined")
+        + "</tr></thead>"
+        "<tbody>"]
+    for r in rows:
+        body.append(
+            "<tr><td><input type='checkbox' name='res' value='%s'></td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+            tuple(esc(x) for x in (
+                r["res"], r["res"], r["name"], r["tag"], tileset_name(r["tileset"]),
+                area_type_label(r["flags"]),
+                r["scripts"]["OnEnter"], r["scripts"]["OnExit"],
+                r["scripts"]["OnHeartbeat"], r["scripts"]["OnUserDefined"])))
+    body.append("</tbody></table></form>")
+    body.append("<p class='note'>%d areas shown.</p>" % len(rows))
+    # Keep the sticky table header pinned just below the toolbar rather than
+    # under it: measure the toolbar's actual rendered height (its content -
+    # filter fields, button count - can wrap differently across browsers/
+    # widths, so a fixed offset would drift) and apply it as the thead's
+    # sticky top offset.
+    body.append(
+        "<script>(function(){"
+        "var tb=document.getElementById('areasToolbar');"
+        "var ths=document.querySelectorAll('table.areas thead th');"
+        "function sync(){ if(!tb) return;"
+        " var px=tb.offsetHeight+'px';"
+        " ths.forEach(function(c){ c.style.top=px; }); }"
+        "sync(); window.addEventListener('resize', sync);"
+        "})();</script>")
+    body.append(SORT_SCRIPT)
+    return page("Areas", "".join(body))
+
+
+def render_scripts_form(root, resrefs):
+    rows = [area_row(root, r) for r in resrefs]
+    inputs = "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' placeholder='(leave unchanged)'>"
+        "</td><td class='note'>%s</td></tr>" %
+        (f, f, esc(", ".join(sorted({r["scripts"][f] or "(none)" for r in rows}))))
+        for f in AREA_SCRIPT_FIELDS)
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>"
+            "<form method='post' action='%s'>%s"
+            "<table><tr><th>Event</th><th>New script resref</th>"
+            "<th>Current value(s)</th></tr>%s</table>"
+            "<p class='note'>Blank = leave unchanged. Enter <b>-</b> to clear "
+            "a script. Max 16 chars, no extension.</p>"
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/apply"),
+             hidden_resrefs(resrefs), inputs, purl("/areas")))
+    return page("Bulk edit area scripts", body)
+
+
+def apply_scripts(root, form):
+    resrefs, changed = form.get("res", []), []
+    for res in resrefs:
+        path = are_path(root, res)
+        d = json_load(path)
+        touched = False
+        for f in AREA_SCRIPT_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if not val:
+                continue
+            new = "" if val == "-" else val.lower()[:16]
+            if getv(d, f) != new:
+                setv(d, f, new, "resref")
+                touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Scripts updated", changed, resrefs)
+
+
+def render_lighting_form(root, resrefs):
+    # Prefill from the first selected area so single-area edits show state.
+    d0 = load_cached(are_path(root, resrefs[0]))
+    color_rows = "".join(
+        "<tr><td>%s</td>"
+        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
+        "<td><span style='display:inline-block;width:2em;height:1em;"
+        "background:%s'></span> %s</td></tr>" %
+        (f, f, dword_to_hex(getv(d0, f, 0)), dword_to_hex(getv(d0, f, 0)))
+        for f in LIGHT_COLOR_FIELDS)
+    num_rows = "".join(
+        "<tr><td>%s</td>"
+        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
+        "<td>%s</td><td class='note'>%s</td></tr>" %
+        (f, f, esc(getv(d0, f, "")), hint)
+        for f, _t, hint in LIGHT_NUM_FIELDS)
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>"
+            "<form method='post' action='%s'>%s"
+            "<fieldset><legend>Colors (hex #rrggbb)</legend>"
+            "<table><tr><th>Field</th><th>New value</th>"
+            "<th>Current (%s)</th></tr>%s</table></fieldset>"
+            "<fieldset><legend>Fog / cycle / wind</legend>"
+            "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
+            "<th>Hint</th></tr>%s</table></fieldset>"
+            "<p class='note'>Blank fields are left unchanged on every area.</p>"
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/apply"),
+             hidden_resrefs(resrefs),
+             esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows, purl("/areas")))
+    return page("Bulk edit lighting & fog", body)
+
+
+def apply_lighting(root, form):
+    resrefs, changed = form.get("res", []), []
+    for res in resrefs:
+        path = are_path(root, res)
+        d = json_load(path)
+        touched = False
+        for f in LIGHT_COLOR_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if val:
+                setv(d, f, hex_to_dword(val), "dword")
+                touched = True
+        for f, gff_type, _hint in LIGHT_NUM_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if val:
+                setv(d, f, float(val) if gff_type == "float" else int(val), gff_type)
+                touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Lighting updated", changed, resrefs)
+
+
+def render_music_form(root, resrefs):
+    # Prefill from the first selected area so single-area edits show state.
+    d0 = load_cached(are_path(root, resrefs[0]))
+    rows = "".join(
+        "<tr><td>%s</td>"
+        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
+        "<td>%s</td><td class='note'>%s</td></tr>" %
+        (f, f, esc(getv(d0, f, "")), hint)
+        for f, _t, hint in MUSIC_FIELDS)
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>"
+            "<form method='post' action='%s'>%s"
+            "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
+            "<th>Hint</th></tr>%s</table>"
+            "<p class='note'>Blank fields are left unchanged on every area. "
+            "Day/Night/Battle values are row indices into ambientmusic.2da "
+            "(look them up with the toolset's music picker or nwn-mcp's "
+            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<input type='submit' value='Apply to selected areas'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
+             hidden_resrefs(resrefs), esc(resrefs[0]), rows, purl("/areas")))
+    return page("Bulk edit area music", body)
+
+
+def apply_music(root, form):
+    resrefs, changed = form.get("res", []), []
+    for res in resrefs:
+        path = are_path(root, res)
+        d = json_load(path)
+        touched = False
+        for f, gff_type, _hint in MUSIC_FIELDS:
+            val = form.get(f, [""])[0].strip()
+            if val:
+                setv(d, f, int(val), gff_type)
+                touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Music updated", changed, resrefs)
+
+
+def render_tags_form(root, resrefs):
+    rows = []
+    for res in resrefs:
+        d = load_cached(are_path(root, res))
+        rows.append(
+            "<tr><td>%s</td><td>%s</td>"
+            "<td><input type='text' name='tag_%s' value='%s'></td>"
+            "<td><input type='text' name='ref_%s' placeholder='(keep %s)'></td></tr>" %
+            (esc(res), esc(loc_get(d, "Name")), esc(res),
+             esc(getv(d, "Tag", "")), esc(res), esc(res)))
+    body = ("<form method='post' action='%s'>%s"
+            "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
+            "<th>New ResRef (renames files!)</th></tr>%s</table>"
+            "<p class='warn'>ResRef rename moves the .are.json/.git.json/"
+            ".gic.json files on disk and rewrites the ResRef field, but does "
+            "NOT update door/trigger transitions in other areas that target "
+            "the old resref - search those separately.</p>"
+            "<input type='submit' value='Apply'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows),
+             purl("/areas")))
+    return page("Edit area tags / resrefs", body)
+
+
+def apply_tags(root, git_root, gic_root, form):
+    resrefs, changed, errors = form.get("res", []), [], []
+    for res in resrefs:
+        path = are_path(root, res)
+        d = json_load(path)
+        touched = False
+        new_tag = form.get("tag_" + res, [""])[0].strip()
+        if new_tag and new_tag != getv(d, "Tag"):
+            setv(d, "Tag", new_tag, "cexostring")
+            touched = True
+        new_ref = form.get("ref_" + res, [""])[0].strip().lower()
+        if new_ref and new_ref != res:
+            if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
+                errors.append("%s: invalid resref %r" % (res, new_ref))
+                new_ref = ""
+            elif os.path.exists(are_path(root, new_ref)):
+                errors.append("%s: %r already exists" % (res, new_ref))
+                new_ref = ""
+        else:
+            new_ref = ""
+        if new_ref:
+            setv(d, "ResRef", new_ref, "resref")
+            touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+        if new_ref:
+            for base, ext in ((root, ".are.json"), (git_root, ".git.json"),
+                               (gic_root, ".gic.json")):
+                old_p = os.path.join(base, res + ext)
+                if os.path.exists(old_p):
+                    os.replace(old_p, os.path.join(base, new_ref + ext))
+                    invalidate(old_p)
+    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
+    return result_page("Tags updated", changed, resrefs, extra)
+
+
+def result_page(title, changed, selected, extra=""):
+    body = ("<p class='ok'>Changed %d of %d selected: %s</p>%s"
+            "<p><a href='%s'>Back to areas</a></p>" %
+            (len(changed), len(selected),
+             esc(", ".join(changed) or "(nothing - all values blank/same)"),
+             extra, purl("/areas")))
+    return page(title, body)
+
+
+# --- Remove placed objects (creatures/placeables/loose items + their -------
+#     nested inventory) from selected areas' .git.json -----------------------
+# Top-level placed-object list fields, keyed by a short URL-safe category
+# name. Field name spacing is genuinely inconsistent in GFF-JSON ("Creature
+# List" / "Placeable List" are spaced, bare "List" holds loose ground items)
+# - that's the real shape, not a typo to fix.
+OBJECT_LIST_FIELDS = {
+    "creature": "Creature List",
+    "placeable": "Placeable List",
+    "item": "List",
+}
+
+# Nested inventory fields per top-level category. Loose items have no
+# inventory of their own here, so "item" is intentionally absent.
+INVENTORY_SUBFIELDS = {
+    "creature": [("Equip_ItemList", "Equipped"), ("ItemList", "Carried")],
+    "placeable": [("ItemList", "Carried")],
+}
+
+
+def _obj_position(entry):
+    x = getv(entry, "X", getv(entry, "XPosition", 0.0))
+    y = getv(entry, "Y", getv(entry, "YPosition", 0.0))
+    return x, y
+
+
+def _obj_name(category, entry):
+    """Display name for a placed instance - .git entries carry the same
+    localized-name fields as their blueprint (FirstName/LastName for
+    creatures, LocalizedName/LocName for placeables and items)."""
+    if category == "creature":
+        first = loc_get(entry, "FirstName")
+        last = loc_get(entry, "LastName")
+        return ("%s %s" % (first, last)).strip()
+    return loc_get(entry, "LocalizedName") or loc_get(entry, "LocName") or ""
+
+
+def _inventory_rows_html(res, category, idx, entry):
+    rows = []
+    for subfield, label in INVENTORY_SUBFIELDS.get(category, []):
+        items = getv(entry, subfield, [])
+        for sub_idx, item in enumerate(items):
+            resref = getv(item, "EquippedRes", getv(item, "InventoryRes", ""))
+            name = item_name(item)
+            where = label
+            if subfield == "Equip_ItemList":
+                slot_id = item.get("__struct_id", 0)
+                where = "%s (%s)" % (label, EQUIP_SLOT_NAMES.get(
+                    slot_id, "Slot %s" % slot_id))
+            cb_value = "|".join((res, category, str(idx), subfield, str(sub_idx)))
+            rows.append(
+                "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                "<td colspan='4'>%s: %s%s</td></tr>" %
+                (esc(cb_value), esc(where), esc(resref),
+                 " (%s)" % esc(name) if name else ""))
+    if not rows:
+        return ""
+    return ("<tr class='qnm-detail'><td></td><td colspan='4'>"
+            "<table class='nested'>%s</table></td></tr>" % "".join(rows))
+
+
+def render_remove_objects_form(root, git_root, resrefs):
+    sections = []
+    for res in resrefs:
+        path = git_path(git_root, res)
+        if not os.path.isfile(path):
+            continue
+        g = load_cached(path)
+        area_rows = []
+        for category, field in OBJECT_LIST_FIELDS.items():
+            entries = getv(g, field, [])
+            for idx, entry in enumerate(entries):
+                tag = getv(entry, "Tag", "")
+                name = _obj_name(category, entry)
+                blueprint = getv(entry, "TemplateResRef", "")
+                x, y = _obj_position(entry)
+                cb_value = "|".join((res, category, str(idx)))
+                pos_sort = "%012.3f,%012.3f" % (x, y)
+                area_rows.append(
+                    "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                    "<td data-sort='%s'>%.1f, %.1f</td></tr>" %
+                    (esc(cb_value), esc(category), esc(name), esc(tag),
+                     esc(blueprint), esc(pos_sort), x, y))
+                area_rows.append(_inventory_rows_html(res, category, idx, entry))
+        area_rows = [r for r in area_rows if r]
+        if not area_rows:
+            continue
+        sections.append(
+            "<h3>%s</h3><table><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
+            (esc(res), sth("Type"), sth("Name"), sth("Tag"), sth("Blueprint"),
+             sth("Position"), "".join(area_rows)))
+
+    if not sections:
+        return page("Remove placed objects",
+                    "<p class='note'>No placeables, creatures, or loose "
+                    "items found in the selected area(s).</p>"
+                    "<p><a href='%s'>Back</a></p>" % purl("/areas"))
+
+    body = ("<form method='post' action='%s'>%s%s"
+            "<p class='note'>Tick objects to REMOVE, then Apply. First edit "
+            "of each area keeps a one-time .git.json.bak backup, but this is "
+            "otherwise permanent - review before applying.</p>"
+            "<input type='submit' value='Remove selected'> "
+            "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+            (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
+             "".join(sections), purl("/areas")))
+    return page("Remove placed objects", body + SORT_SCRIPT)
+
+
+def apply_remove_objects(root, git_root, form):
+    resrefs = form.get("res", [])
+    top_doomed = defaultdict(set)
+    nested_doomed = defaultdict(set)
+    for val in form.get("del", []):
+        parts = val.split("|")
+        if len(parts) == 3:
+            res, category, idx_s = parts
+            if res in resrefs and category in OBJECT_LIST_FIELDS:
+                top_doomed[(res, category)].add(int(idx_s))
+        elif len(parts) == 5:
+            res, category, idx_s, subfield, sub_s = parts
+            if res in resrefs and category in OBJECT_LIST_FIELDS:
+                nested_doomed[(res, category, int(idx_s), subfield)].add(int(sub_s))
+
+    changed = []
+    for res in resrefs:
+        path = git_path(git_root, res)
+        if not os.path.isfile(path):
+            continue
+        g = json_load(path)
+        touched = False
+
+        # Nested removals first: filter a container entry's own sub-list in
+        # place. If that same container is also doomed at the top level, the
+        # whole entry disappears next anyway, so order doesn't matter.
+        for (nres, category, idx, subfield), sub_idx_set in nested_doomed.items():
+            if nres != res:
+                continue
+            entries = getv(g, OBJECT_LIST_FIELDS[category], [])
+            if idx >= len(entries):
+                continue
+            container = entries[idx]
+            items = getv(container, subfield, [])
+            kept = [it for i, it in enumerate(items) if i not in sub_idx_set]
+            if len(kept) != len(items):
+                setv(container, subfield, kept, "list")
+                touched = True
+
+        for category, field in OBJECT_LIST_FIELDS.items():
+            idx_set = top_doomed.get((res, category))
+            if not idx_set:
+                continue
+            entries = getv(g, field, [])
+            kept = [e for i, e in enumerate(entries) if i not in idx_set]
+            if len(kept) != len(entries):
+                setv(g, field, kept, "list")
+                touched = True
+
+        if touched:
+            json_save(path, g)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Objects removed", changed, resrefs)
+
+
+# --- Area map (ported from skills/nwn-web-editor/scripts/nwn_area_map.py) ---
+# Self-contained, pan/zoomable interactive SVG map of a project's areas, laid
+# out by the cardinal directions implied by door/trigger/waypoint transitions.
+#
+# How directions are inferred: every door/trigger transition knows where it
+# sits inside its source area and where its destination (door or waypoint
+# tag) sits inside the target area. An exit near the source's north edge that
+# lands near the destination's south edge votes "destination is north of
+# source". Votes for all transitions between a pair are averaged into one
+# cardinal.
+#
+# Layout: each connected component is laid out independently (BFS from its
+# best-connected area, stepping one grid cell per cardinal), then components
+# are shelf-packed side by side so unjoined groups get their own region of
+# the map. When two areas contend for the same grid cell, an underground area
+# may share the cell with a surface area as a second layer; same-layer
+# collisions probe further along the cardinal instead.
+
+def read_module_map(root, git_root):
+    """JSON-native area/transition reader for the map (reads <res>.are.json /
+    <res>.git.json via load_cached() - no nwn_gff subprocess). Returns
+    (areas, transitions):
+      areas[res] = {name, tag, underground, w, h (meters)}
+      transitions = [(src_res, dst_res, dirvec (dx,dy) normalized-ish)]
+    """
+    areas = {}
+    exits = []           # (src_res, linked_to_tag, x, y)
+    tag_landing = {}     # dest tag -> (area_res, x, y); doors + waypoints
+    for res in area_resrefs(root):
+        a = load_cached(are_path(root, res))
+        areas[res] = {
+            "name": loc_get(a, "Name") or res,
+            "tag": getv(a, "Tag", ""),
+            "underground": bool(getv(a, "Flags", 0) & AREA_FLAG_UNDERGROUND),
+            "w": getv(a, "Width", 8) * 10.0,
+            "h": getv(a, "Height", 8) * 10.0,
+        }
+        gpath = git_path(git_root, res)
+        if not os.path.isfile(gpath):
+            continue
+        g = load_cached(gpath)
+        for door in getv(g, "Door List", []):
+            x, y = getv(door, "X", 0.0), getv(door, "Y", 0.0)
+            tag = getv(door, "Tag", "")
+            if tag:
+                tag_landing.setdefault(tag, (res, x, y))
+            link = getv(door, "LinkedTo", "")
+            if link and getv(door, "LinkedToFlags", 0):
+                exits.append((res, link, x, y))
+        for trig in getv(g, "TriggerList", []):
+            link = getv(trig, "LinkedTo", "")
+            if link and getv(trig, "LinkedToFlags", 0):
+                exits.append((res, link,
+                              getv(trig, "XPosition", 0.0),
+                              getv(trig, "YPosition", 0.0)))
+        for wp in getv(g, "WaypointList", []):
+            tag = getv(wp, "Tag", "")
+            if tag:
+                tag_landing.setdefault(tag, (res,
+                                             getv(wp, "XPosition", 0.0),
+                                             getv(wp, "YPosition", 0.0)))
+
+    transitions = []
+    for src, link, x, y in exits:
+        hit = tag_landing.get(link)
+        if not hit or hit[0] == src or hit[0] not in areas:
+            continue
+        dst, dx_land, dy_land = hit
+        sa, da = areas[src], areas[dst]
+        # normalized offsets from each area's center, range about [-0.5, 0.5];
+        # NWN Y grows northward, so +y already means north.
+        exit_off = (x / sa["w"] - 0.5, y / sa["h"] - 0.5)
+        entry_off = (dx_land / da["w"] - 0.5, dy_land / da["h"] - 0.5)
+        transitions.append((src, dst,
+                            (exit_off[0] - entry_off[0],
+                             exit_off[1] - entry_off[1])))
+    return areas, transitions
+
+
+def build_edges(transitions):
+    """Collapse raw transitions into one edge per unordered pair.
+
+    Returns edges[(a, b)] = {"vec": (dx, dy) meaning b relative to a,
+                             "two_way": bool}
+    """
+    votes = defaultdict(list)
+    for src, dst, vec in transitions:
+        votes[(src, dst)].append(vec)
+    edges = {}
+    for (src, dst), vs in votes.items():
+        if (dst, src) in edges:
+            e = edges[(dst, src)]
+            e["two_way"] = True
+            # fold reverse-direction votes in, flipped
+            n = len(vs)
+            e["vec"] = (e["vec"][0] - sum(v[0] for v in vs) / n,
+                        e["vec"][1] - sum(v[1] for v in vs) / n)
+            continue
+        n = len(vs)
+        edges[(src, dst)] = {
+            "vec": (sum(v[0] for v in vs) / n, sum(v[1] for v in vs) / n),
+            "two_way": False,
+        }
+    return edges
+
+
+def grid_step(vec):
+    """Vote vector -> grid step (each axis in {-1,0,1}, diagonals allowed).
+    Grid Y grows SOUTH (screen coordinates), NWN Y grows north - flip here,
+    once. An axis only contributes if it's a meaningful share of the vote."""
+    dx, dy = vec
+    m = max(abs(dx), abs(dy))
+    if m == 0:
+        return (1, 0)
+    sx = 0 if abs(dx) < 0.4 * m else (1 if dx > 0 else -1)
+    sy = 0 if abs(dy) < 0.4 * m else (-1 if dy > 0 else 1)
+    return (sx, sy) if (sx, sy) != (0, 0) else (1, 0)
+
+
+def components(areas, edges):
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
+    seen, comps = set(), []
+    for res in areas:
+        if res in seen:
+            continue
+        stack, comp = [res], []
+        seen.add(res)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nb in adj[cur]:
+                if nb not in seen:
+                    seen.add(nb)
+                    stack.append(nb)
+        comps.append(comp)
+    comps.sort(key=len, reverse=True)
+    return comps, adj
+
+
+def layout_component(comp, areas, edges, adj):
+    """Place each area of one component on an integer grid. Returns
+    pos[res] = (gx, gy). Underground and surface areas may share a cell."""
+    step_of = {}
+    for (a, b), e in edges.items():
+        sx, sy = grid_step(e["vec"])
+        step_of[(a, b)] = (sx, sy)
+        step_of[(b, a)] = (-sx, -sy)
+
+    occupied = {}   # (gx, gy, layer) -> res
+    pos = {}
+
+    def layer(res):
+        return 1 if areas[res]["underground"] else 0
+
+    def place(res, gx, gy, from_cell=None):
+        """Claim the free cell nearest to the ideal (gx, gy). A cell only
+        conflicts within the same layer, so an underground area stacks onto
+        a surface area's cell - that's the requested layering. When probing,
+        prefer cells that keep the same compass side of the parent cell."""
+        lay, ring_step = layer(res), 0
+        while True:
+            ring = [(gx, gy)] if ring_step == 0 else [
+                (gx + ox, gy + oy)
+                for ox in range(-ring_step, ring_step + 1)
+                for oy in range(-ring_step, ring_step + 1)
+                if max(abs(ox), abs(oy)) == ring_step]
+            free = [c for c in ring if (c[0], c[1], lay) not in occupied]
+            if free:
+                if from_cell:
+                    fx, fy = from_cell
+                    want = (gx - fx, gy - fy)
+                    # keep the direction from the parent: penalize sign flips
+                    free.sort(key=lambda c: (
+                        (0 if (c[0] - fx) * want[0] >= 0 else 1) +
+                        (0 if (c[1] - fy) * want[1] >= 0 else 1),
+                        (c[0] - gx) ** 2 + (c[1] - gy) ** 2))
+                cx, cy = free[0]
+                occupied[(cx, cy, lay)] = res
+                pos[res] = (cx, cy)
+                return
+            ring_step += 1
+
+    start = max(comp, key=lambda r: len(adj[r]))
+    place(start, 0, 0)
+    queue = [start]
+    while queue:
+        cur = queue.pop(0)
+        cx, cy = pos[cur]
+        for nb in sorted(adj[cur]):
+            if nb in pos:
+                continue
+            dx, dy = step_of.get((cur, nb), (1, 0))
+            place(nb, cx + dx, cy + dy, from_cell=(cx, cy))
+            queue.append(nb)
+    return pos
+
+
+def layout_module(areas, edges):
+    """Full layout: big components shelf-packed left to right, then all
+    singleton (unjoined) areas in their own dense block below."""
+    comps, adj = components(areas, edges)
+    multi = [c for c in comps if len(c) > 1]
+    singles = [c[0] for c in comps if len(c) == 1]
+
+    placed = {}      # res -> (gx, gy) global grid
+    comp_id = {}
+    shelf_x, shelf_y, shelf_h = 0, 0, 0
+    total_cells = sum(len(c) for c in multi) or 1
+    max_row_w = max(12, int(total_cells ** 0.5 * 2.2))
+    boxes = []       # (label, gx0, gy0, gx1, gy1)
+
+    for idx, comp in enumerate(multi):
+        pos = layout_component(comp, areas, edges, adj)
+        xs = [p[0] for p in pos.values()]
+        ys = [p[1] for p in pos.values()]
+        w, h = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+        if shelf_x > 0 and shelf_x + w > max_row_w:
+            shelf_x, shelf_y, shelf_h = 0, shelf_y + shelf_h + 2, 0
+        ox, oy = shelf_x - min(xs), shelf_y - min(ys)
+        for res, (gx, gy) in pos.items():
+            placed[res] = (gx + ox, gy + oy)
+            comp_id[res] = idx
+        boxes.append(("Region %d (%d areas)" % (idx + 1, len(comp)),
+                      shelf_x, shelf_y, shelf_x + w - 1, shelf_y + h - 1))
+        shelf_x += w + 2
+        shelf_h = max(shelf_h, h)
+
+    # singles block
+    if singles:
+        sy0 = shelf_y + shelf_h + 3
+        per_row = max(8, max_row_w)
+        for i, res in enumerate(sorted(singles)):
+            placed[res] = (i % per_row, sy0 + i // per_row)
+            comp_id[res] = -1
+        boxes.append(("Unconnected areas (%d)" % len(singles),
+                      0, sy0, per_row - 1, sy0 + (len(singles) - 1) // per_row))
+    return placed, comp_id, boxes
+
+
+MAP_CELL_W, MAP_CELL_H = 190, 140
+MAP_NODE_W, MAP_NODE_H = 158, 84
+MAP_UG_OFF = 18  # px offset for underground node sharing a cell
+
+
+def node_xy(placed, areas, res):
+    gx, gy = placed[res]
+    x = gx * MAP_CELL_W + (MAP_CELL_W - MAP_NODE_W) / 2
+    y = gy * MAP_CELL_H + (MAP_CELL_H - MAP_NODE_H) / 2
+    if areas[res]["underground"]:
+        x += MAP_UG_OFF
+        y += MAP_UG_OFF
+    return x, y
+
+
+def render_svg(areas, edges, placed, boxes):
+    parts = []
+    # region boxes first (bottom of stack)
+    for label, gx0, gy0, gx1, gy1 in boxes:
+        x, y = gx0 * MAP_CELL_W - 12, gy0 * MAP_CELL_H - 12
+        w = (gx1 - gx0 + 1) * MAP_CELL_W + 24
+        h = (gy1 - gy0 + 1) * MAP_CELL_H + 24 + MAP_UG_OFF
+        parts.append(
+            "<rect class='region' x='%d' y='%d' width='%d' height='%d' rx='14'/>"
+            "<text class='regionlabel' x='%d' y='%d'>%s</text>"
+            % (x, y, w, h, x + 10, y - 4, esc(label)))
+    # edges
+    for (a, b), e in edges.items():
+        ax, ay = node_xy(placed, areas, a)
+        bx, by = node_xy(placed, areas, b)
+        ax += MAP_NODE_W / 2
+        ay += MAP_NODE_H / 2
+        bx += MAP_NODE_W / 2
+        by += MAP_NODE_H / 2
+        cls = "edge"
+        if areas[a]["underground"] != areas[b]["underground"]:
+            cls += " crosslayer"
+        marker = "" if e["two_way"] else " marker-end='url(#arrow)'"
+        parts.append(
+            "<line class='%s' x1='%.0f' y1='%.0f' x2='%.0f' y2='%.0f'%s>"
+            "<title>%s %s %s%s</title></line>"
+            % (cls, ax, ay, bx, by, marker, esc(a),
+               "&#8596;" if e["two_way"] else "&#8594;", esc(b),
+               " (cross-layer)" if "crosslayer" in cls else ""))
+    # nodes
+    for res in placed:
+        a = areas[res]
+        x, y = node_xy(placed, areas, res)
+        cls = "node ug" if a["underground"] else "node surface"
+        name = a["name"] if len(a["name"]) <= 26 else a["name"][:25] + "…"
+        parts.append(
+            "<g class='%s' data-name='%s' data-res='%s'>"
+            "<rect x='%.0f' y='%.0f' width='%d' height='%d' rx='8'/>"
+            "<text x='%.0f' y='%.0f'>%s</text>"
+            "<text class='res' x='%.0f' y='%.0f'>%s%s</text>"
+            "<title>%s\nresref: %s\ntag: %s\n%s</title></g>"
+            % (cls, esc(a["name"].lower()), esc(res),
+               x, y, MAP_NODE_W, MAP_NODE_H,
+               x + MAP_NODE_W / 2, y + 34, esc(name),
+               x + MAP_NODE_W / 2, y + 58, esc(res),
+               " ▼" if a["underground"] else "",
+               esc(a["name"]), esc(res), esc(a["tag"]),
+               "underground" if a["underground"] else "surface"))
+    max_x = max(gx for gx, _ in placed.values()) + 1
+    max_y = max(gy for _, gy in placed.values()) + 1
+    return "\n".join(parts), max_x * MAP_CELL_W + 40, max_y * MAP_CELL_H + 60
+
+
+# Supplemental stylesheet for the area map's full-viewport pan/zoom canvas
+# (composed as CSS + MAP_CSS, same pattern as SHELL_CSS - the map's fixed,
+# non-scrolling layout would conflict with CSS's normal scrolling-document
+# rules if merged into one block). Colors reconciled to the console's exact
+# existing palette (CSS above) wherever a console analog exists; anything
+# with no console counterpart (edge lines, search-hit highlight, muted
+# resref/region-label text) is left as an internally-consistent decorative
+# color rather than force-fit onto an unrelated console semantic color.
+MAP_CSS = """
+html,body{margin:0;height:100%;overflow:hidden;background:#1e1f24;color:#d8d9de;
+ font-family:system-ui,sans-serif}
+#topnav{position:fixed;top:0;left:0;right:0;z-index:4;background:#1e1f24;
+ border-bottom:1px solid #444;padding:.4em 1em}
+#bar{position:fixed;left:0;right:0;z-index:3;background:#1e1f24ee;
+ padding:.5em 1em;display:flex;gap:1.2em;align-items:center;border-bottom:1px solid #444}
+#bar input[type=search]{background:#2a2b31;color:#d8d9de;border:1px solid #555;
+ padding:.25em .5em;width:16em}
+#bar label{user-select:none}
+#stage{position:fixed;left:0;right:0;bottom:0;cursor:grab;touch-action:none;overflow:hidden}
+#stage.panning{cursor:grabbing}
+#stage svg{position:absolute;inset:0;width:100%;height:100%;display:block}
+svg{width:100%;height:100%}
+.region{fill:#25262c;stroke:#444;stroke-width:1.5}
+.regionlabel{fill:#9aa0ae;font-size:15px}
+.node rect{fill:#39507a;stroke:#7ab3ff;stroke-width:1.5}
+.node.ug rect{fill:#25262c;stroke:#e6a23c;stroke-dasharray:5 3}
+.node text{fill:#d8d9de;font-size:13px;text-anchor:middle}
+.node text.res{fill:#9aa0ae;font-size:11px}
+.node.hit rect{stroke:#ffd75e;stroke-width:3}
+.node{cursor:pointer}
+.edge{stroke:#6f7787;stroke-width:1.6}
+.edge.crosslayer{stroke:#e6a23c;stroke-dasharray:6 4}
+.hidden{display:none}
+#popup{position:fixed;z-index:5;background:#25262c;border:1px solid #444;
+ border-radius:8px;padding:.6em .9em;display:none;min-width:14em;
+ box-shadow:0 4px 18px #000a}
+#popup b{display:block;margin-bottom:.35em}
+#popup a{display:block;color:#7ab3ff;text-decoration:none;padding:.15em 0}
+#popup a:hover{text-decoration:underline}
+#popup .close{position:absolute;top:.2em;right:.5em;color:#9aa0ae;cursor:pointer}
+#legend{position:fixed;bottom:0;left:0;z-index:2;background:#1e1f24ee;
+ padding:.4em 1em;font-size:12px;color:#9aa0ae;border-top-right-radius:8px}
+"""
+
+
+MAP_PAGE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>%(title)s - Area Map</title>
+<style>%(css)s</style></head><body>
+<div id="topnav">%(nav)s</div>
+<div id="bar">
+ <b>%(title)s</b>
+ <input type="search" id="q" placeholder="find area by name/resref&#8230;">
+ <label><input type="checkbox" id="ls" checked> surface</label>
+ <label><input type="checkbox" id="lu" checked> underground</label>
+ <label>scale <span id="zoomval">1:1</span>
+  <input type="range" id="zoom" min="1" max="100" value="100"
+   style="width:10em;vertical-align:middle"></label>
+ <button id="fit">fit all</button>
+ <button id="reset">reset view</button>
+ <span style="color:#9aa0ae">%(stats)s</span>
+</div>
+<div id="stage"><svg>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7"
+ markerHeight="7" orient="auto-start-reverse">
+ <path d="M0 0 L10 5 L0 10 z" fill="#6f7787"/></marker></defs>
+<g id="world" transform="translate(20,70) scale(1)">
+%(svg)s
+</g></svg></div>
+<div id="legend">drag to pan &#183; wheel to zoom &#183; click an area to edit it
+ &#183; solid line = linked areas &#183; dashed amber = surface&#8596;underground link
+ &#183; &#9660; dashed box = underground (layered onto the surface cell it overlaps)</div>
+<div id="popup"><span class="close">&#10005;</span><b id="ptitle"></b>
+ <a id="plight" target="_blank">Lighting &amp; fog settings</a>
+ <a id="ptags" target="_blank">Tag / resref</a>
+ <a id="pscripts" target="_blank">Event scripts</a>
+ <a id="pobjects" target="_blank">Remove objects</a>
+ <a id="plist" target="_blank">Open in editor area list</a></div>
+<script>
+const BASE=%(base)s;
+const topnav=document.getElementById('topnav'),bar=document.getElementById('bar'),
+      stage=document.getElementById('stage');
+let topOffset=70;
+function syncBars(){
+ const h1=topnav.offsetHeight;
+ bar.style.top=h1+'px';
+ topOffset=h1+bar.offsetHeight;
+ stage.style.top=topOffset+'px';
+}
+syncBars();window.addEventListener('resize',syncBars);
+const world=document.getElementById('world');
+const popup=document.getElementById('popup');
+let tx=20,ty=topOffset+20,sc=1,panning=false,px=0,py=0,moved=0;
+function apply(){world.setAttribute('transform',
+ `translate(${tx},${ty}) scale(${sc})`);}
+// Pointer events cover mouse AND touch: one pointer pans, two pinch-zoom.
+// No pointer capture (it would swallow the node-click popup); pointers are
+// tracked at window level and clicks suppressed only after a real drag.
+const pointers=new Map();let lastDist=0;
+stage.addEventListener('pointerdown',e=>{
+ pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+ lastDist=0;moved=0;stage.classList.add('panning');});
+window.addEventListener('pointermove',e=>{
+ if(!pointers.has(e.pointerId))return;
+ const prev=pointers.get(e.pointerId);
+ pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+ moved+=Math.abs(e.clientX-prev.x)+Math.abs(e.clientY-prev.y);
+ if(pointers.size===1){tx+=e.clientX-prev.x;ty+=e.clientY-prev.y;apply();}
+ else if(pointers.size===2){
+  const pts=[...pointers.values()];
+  const dist=Math.hypot(pts[0].x-pts[1].x,pts[0].y-pts[1].y);
+  if(lastDist>0)setScale(sc*dist/lastDist,(pts[0].x+pts[1].x)/2,(pts[0].y+pts[1].y)/2);
+  lastDist=dist;}});
+function lift(e){pointers.delete(e.pointerId);lastDist=0;
+ if(pointers.size===0)stage.classList.remove('panning');}
+window.addEventListener('pointerup',lift);
+window.addEventListener('pointercancel',lift);
+stage.addEventListener('click',e=>{
+ if(moved>5)return;                       // it was a pan, not a click
+ const node=e.target.closest('.node');
+ if(!node){popup.style.display='none';return;}
+ const res=node.dataset.res,q=encodeURIComponent(res);
+ document.getElementById('ptitle').textContent=res;
+ document.getElementById('plight').href=BASE+'/areas/edit?action=lighting&res='+q;
+ document.getElementById('ptags').href=BASE+'/areas/edit?action=tags&res='+q;
+ document.getElementById('pscripts').href=BASE+'/areas/edit?action=scripts&res='+q;
+ document.getElementById('pobjects').href=BASE+'/areas/edit?action=remove_objects&res='+q;
+ document.getElementById('plist').href=BASE+'/areas?q='+q;
+ popup.style.left=Math.min(e.clientX+8,innerWidth-260)+'px';
+ popup.style.top=Math.min(e.clientY+8,innerHeight-190)+'px';
+ popup.style.display='block';});
+popup.querySelector('.close').onclick=()=>popup.style.display='none';
+// slider runs 100:1 (far left, whole-module overview) to 1:1 (far right,
+// full size): position V maps to shrink factor N = 101 - V.
+const zoom=document.getElementById('zoom'),zoomval=document.getElementById('zoomval');
+function syncSlider(){const n=Math.min(100,Math.max(1,Math.round(1/sc)));
+ zoom.value=101-n;zoomval.textContent=n+':1';}
+function setScale(ns,cx,cy){ns=Math.min(4,Math.max(.01,ns));
+ tx=cx-(cx-tx)*(ns/sc);ty=cy-(cy-ty)*(ns/sc);sc=ns;apply();syncSlider();}
+stage.addEventListener('wheel',e=>{e.preventDefault();
+ setScale(sc*(e.deltaY<0?1.15:1/1.15),e.clientX,e.clientY);},{passive:false});
+zoom.addEventListener('input',()=>{
+ setScale(1/(101-parseInt(zoom.value,10)),innerWidth/2,innerHeight/2);});
+const WORLD_W=%(w)d,WORLD_H=%(h)d;
+// Fit the whole module inside the fixed stage window: scale the map down so
+// its full extent fits, and center it. The window stays the same size; only
+// the map representation shrinks/grows.
+function fit(){
+ const vw=stage.clientWidth||innerWidth,vh=stage.clientHeight||innerHeight;
+ const ns=Math.min((vw-40)/WORLD_W,(vh-40)/WORLD_H);
+ sc=Math.min(4,Math.max(.01,ns));
+ tx=(vw-WORLD_W*sc)/2;ty=(vh-WORLD_H*sc)/2+topOffset;apply();syncSlider();}
+document.getElementById('fit').onclick=fit;
+document.getElementById('reset').onclick=()=>{tx=20;ty=topOffset+20;sc=1;apply();syncSlider();};
+// Start showing the entire module.
+fit();window.addEventListener('resize',fit);
+document.getElementById('q').addEventListener('input',e=>{
+ const q=e.target.value.toLowerCase();
+ document.querySelectorAll('.node').forEach(n=>{
+  const hit=q&&(n.dataset.name.includes(q)||n.dataset.res.includes(q));
+  n.classList.toggle('hit',!!hit);});});
+function layerToggle(){
+ const s=document.getElementById('ls').checked,u=document.getElementById('lu').checked;
+ document.querySelectorAll('.node.surface').forEach(n=>n.classList.toggle('hidden',!s));
+ document.querySelectorAll('.node.ug').forEach(n=>n.classList.toggle('hidden',!u));}
+document.getElementById('ls').onchange=layerToggle;
+document.getElementById('lu').onchange=layerToggle;
+</script></body></html>
+"""
+
+
+def _map_title(proj, root):
+    ifo = module_ifo_path(root)
+    if os.path.isfile(ifo):
+        name = loc_get(load_cached(ifo), "Mod_Name")
+        if name:
+            return name
+    return proj.slug
+
+
+def render_area_map(proj):
+    root, git_root = proj.unpacked, proj.git_root
+    areas, transitions = read_module_map(root, git_root)
+    if not areas:
+        return page("Area Map", "<p class='note'>No areas found.</p>")
+    edges = build_edges(transitions)
+    placed, comp_id, boxes = layout_module(areas, edges)
+    svg, w, h = render_svg(areas, edges, placed, boxes)
+
+    n_regions = len([b for b in boxes if not b[0].startswith("Unconnected")])
+    n_single = len([r for r, c in comp_id.items() if c == -1])
+    n_ug = len([r for r in areas if areas[r]["underground"]])
+    stats = ("%d areas (%d underground) &#183; %d transitions &#183; "
+             "%d connected regions &#183; %d unconnected"
+             % (len(areas), n_ug, len(edges), n_regions, n_single))
+    title = _map_title(proj, root)
+    return MAP_PAGE % {
+        "title": esc(title), "nav": _nav(), "css": CSS + MAP_CSS,
+        "svg": svg, "w": w, "h": h, "stats": stats,
+        # rstrip, not bare purl(""): purl()'s "" -> "/" fallback (for when
+        # it's used directly as a plain link elsewhere) would otherwise make
+        # single-project mode with no --url-prefix produce BASE="/", and
+        # BASE+'/areas/edit?...' a leading "//..." - a PROTOCOL-RELATIVE URL
+        # a browser would resolve against a different host entirely.
+        "base": json.dumps(purl("").rstrip("/")),
+    }
+
+
+# --- Creature blueprints (.utc.json) ----------------------------------------
+# Ported from nwn_web_editor.py, JSON-native (reads unpacked/*.utc.json directly
+# instead of round-tripping binary .utc through nwn_gff).
+
+ABILITY_FIELDS = ["Str", "Dex", "Con", "Int", "Wis", "Cha"]
+STAT_FIELDS = [  # (field, type) - only rendered when present in the file
+    ("NaturalAC", "byte"), ("HitPoints", "short"), ("CurrentHitPoints", "short"),
+    ("MaxHitPoints", "short"), ("fortbonus", "short"), ("refbonus", "short"),
+    ("willbonus", "short"), ("ChallengeRating", "float"), ("WalkRate", "int"),
+]
+APPEAR_FIELDS = [  # only rendered when present (dynamic-appearance creatures)
+    ("Appearance_Type", "word"), ("PortraitId", "word"), ("Gender", "byte"),
+    ("Race", "byte"), ("Phenotype", "int"), ("Appearance_Head", "byte"),
+    ("Color_Hair", "byte"), ("Color_Skin", "byte"),
+    ("Color_Tattoo1", "byte"), ("Color_Tattoo2", "byte"),
+    ("Tail_New", "dword"), ("Wings_New", "dword"),
+]
+
+
+# Slot bitmask -> display name for Equip_ItemList struct IDs (Bioware Aurora
+# GFF/UTC format; fixed engine values, not module-specific).
+EQUIP_SLOT_NAMES = {
+    1: "Head", 2: "Chest", 4: "Boots", 8: "Arms",
+    16: "Right Hand", 32: "Left Hand", 64: "Cloak",
+    128: "Left Ring", 256: "Right Ring", 512: "Neck",
+    1024: "Belt", 2048: "Arrows", 4096: "Bullets", 8192: "Bolts",
+    16384: "Creature Weapon (L)", 32768: "Creature Weapon (R)",
+    65536: "Creature Weapon (Bite)", 131072: "Creature Armor",
+}
+
+# Stock class/portrait ID -> name lookups, generated by
+# wiki_data/_build_stock.py from stock NWN 2DAs. Falls back to the raw ID
+# when the table is missing or a row isn't in it (e.g. a homebrew prestige
+# class/portrait added by a module's own HAK).
+_STOCK_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_data")
+_STOCK_JSON_CACHE = {}
+
+
+def _load_stock_json(name):
+    if name not in _STOCK_JSON_CACHE:
+        try:
+            with open(os.path.join(_STOCK_DATA_DIR, name + ".json"), encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        data.pop("_source", None)
+        _STOCK_JSON_CACHE[name] = data
+    return _STOCK_JSON_CACHE[name]
+
+
+def class_name(class_id):
+    return _load_stock_json("classes").get(str(class_id), str(class_id))
+
+
+def portrait_name(portrait_id):
+    return _load_stock_json("portraits").get(str(portrait_id), str(portrait_id))
+
+
+def feat_name(feat_id):
+    return _load_stock_json("feat").get(str(feat_id), str(feat_id))
+
+
+def utc_path(root, res):
+    return os.path.join(root, res + ".utc.json")
+
+
+def creature_resrefs(root):
+    return sorted(f[:-len(".utc.json")] for f in os.listdir(root)
+                  if f.endswith(".utc.json"))
+
+
+def creature_summary(d):
+    classes = ", ".join(
+        "%s lvl %s" % (class_name(getv(c, "Class", "?")), getv(c, "ClassLevel", "?"))
+        for c in getv(d, "ClassList", []))
+    return {
+        "first": loc_get(d, "FirstName"), "last": loc_get(d, "LastName"),
+        "tag": getv(d, "Tag", ""), "classes": classes,
+        "appearance": getv(d, "Appearance_Type", ""),
+    }
+
+
+def render_creatures(root, query):
+    q = (query.get("q", [""])[0]).lower()
+    body = ["<form method='get'>Filter: <input type='text' name='q' value='%s'>"
+            "<input type='submit' value='Apply'></form>" % esc(q),
+            "<table><tr>%s%s%s%s%s</tr>" %
+            (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"), sth("Appearance"))]
+    count = 0
+    for res in creature_resrefs(root):
+        d = load_cached(utc_path(root, res))
+        s = creature_summary(d)
+        name = ("%s %s" % (s["first"], s["last"])).strip()
+        if q and q not in res.lower() and q not in name.lower() \
+                and q not in s["tag"].lower():
+            continue
+        count += 1
+        body.append("<tr><td><a href='%s'>%s</a></td>"
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                    (purl("/creature?res=" + urllib.parse.quote(res)), esc(res),
+                     esc(name), esc(s["tag"]), esc(s["classes"]),
+                     esc(s["appearance"])))
+    body.append("</table><p class='note'>%d creatures shown.</p>" % count)
+    body.append(SORT_SCRIPT)
+    return page("Creature blueprints (.utc)", "".join(body))
+
+
+def item_name(item):
+    return loc_get(item, "LocalizedName") or loc_get(item, "LocName") or ""
+
+
+def render_equipment(d):
+    equipped = getv(d, "Equip_ItemList", [])
+    carried = getv(d, "ItemList", [])
+
+    if equipped:
+        rows = []
+        for item in sorted(equipped, key=lambda i: i.get("__struct_id", 0)):
+            slot_id = item.get("__struct_id", 0)
+            slot = EQUIP_SLOT_NAMES.get(slot_id, "Slot %s" % slot_id)
+            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                        (esc(slot), esc(getv(item, "EquippedRes", "")),
+                         esc(item_name(item))))
+        equip_html = ("<table><tr><th>Slot</th><th>ResRef</th><th>Name</th></tr>"
+                     "%s</table>" % "".join(rows))
+    else:
+        equip_html = "<p class='note'>nothing equipped</p>"
+
+    if carried:
+        rows = "".join(
+            "<tr><td>%s</td><td>%s</td></tr>" %
+            (esc(getv(item, "InventoryRes", "")), esc(item_name(item)))
+            for item in carried)
+        carried_html = ("<p>%d item%s carried:</p>"
+                        "<table><tr><th>ResRef</th><th>Name</th></tr>%s</table>" %
+                        (len(carried), "" if len(carried) == 1 else "s", rows))
+    else:
+        carried_html = "<p class='note'>nothing carried</p>"
+
+    return equip_html + carried_html
+
+
+def render_char_form(d, action, ident_html):
+    def num_input(f):
+        return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
+                "</td></tr>" % (f, f, esc(getv(d, f, ""))))
+
+    abil = "".join(num_input(f) for f in ABILITY_FIELDS)
+    stats = "".join(num_input(f) for f, _t in STAT_FIELDS if f in d)
+    appear = "".join(num_input(f) for f, _t in APPEAR_FIELDS if f in d)
+    portrait = ("<p class='note'>Current portrait: <b>%s</b></p>" %
+               esc(portrait_name(getv(d, "PortraitId", "")))
+               if "PortraitId" in d else "")
+
+    feats = sorted(getv(f, "Feat", -1) for f in getv(d, "FeatList", []))
+    feat_boxes = "".join(
+        "<label style='display:inline-block;margin:.15em .5em'>"
+        "<input type='checkbox' name='delfeat' value='%d'> %d %s</label>" %
+        (n, n, esc(feat_name(n)))
+        for n in feats)
+
+    return (
+        "<form method='post' action='%s'>%s"
+        "<fieldset><legend>Identity</legend><table>"
+        "<tr><td>FirstName</td><td><input type='text' name='FirstName' value='%s'></td></tr>"
+        "<tr><td>LastName</td><td><input type='text' name='LastName' value='%s'></td></tr>"
+        "<tr><td>Tag</td><td><input type='text' name='Tag' value='%s'></td></tr>"
+        "</table></fieldset>"
+        "<fieldset><legend>Abilities</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Stats</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Appearance</legend>%s<table>%s</table>"
+        "<p class='note'>Only fields present in this file are shown; static-"
+        "appearance creatures have no head/body-part fields. IDs come from "
+        "appearance.2da / portraits.2da etc.</p></fieldset>"
+        "<fieldset><legend>Equipment &amp; Inventory</legend>%s</fieldset>"
+        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s"
+        "<p>Add feat IDs (comma-separated): "
+        "<input type='text' name='addfeats' placeholder='e.g. 1,28,411'></p>"
+        "</fieldset>"
+        "<p class='note'>Blank numeric fields are left unchanged.</p>"
+        "<input type='submit' value='Save'></form>" %
+        (action, ident_html, esc(loc_get(d, "FirstName")),
+         esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
+         abil, stats, portrait, appear, render_equipment(d), len(feats),
+         feat_boxes or "<p class='note'>none</p>"))
+
+
+def apply_char_edits(d, form):
+    """Apply UTC form fields onto dict d. Returns True if changed."""
+    touched = False
+    for name in ("FirstName", "LastName"):
+        val = form.get(name, [None])[0]
+        if val is not None and val != loc_get(d, name):
+            loc_set(d, name, val)
+            touched = True
+    tag = form.get("Tag", [None])[0]
+    if tag is not None and tag != getv(d, "Tag"):
+        setv(d, "Tag", tag, "cexostring")
+        touched = True
+
+    numeric = [(f, "byte") for f in ABILITY_FIELDS] + STAT_FIELDS + APPEAR_FIELDS
+    for f, gff_type in numeric:
+        val = form.get(f, [""])[0].strip()
+        if not val:
+            continue
+        new = float(val) if gff_type == "float" else int(val)
+        if getv(d, f) != new:
+            setv(d, f, new, gff_type)
+            touched = True
+
+    delfeats = {int(x) for x in form.get("delfeat", [])}
+    addfeats = [int(x) for x in
+                re.split(r"[,\s]+", form.get("addfeats", [""])[0].strip()) if x]
+    if delfeats or addfeats:
+        fl = d.setdefault("FeatList", {"type": "list", "value": []})
+        entries = fl["value"]
+        have = {getv(e, "Feat") for e in entries}
+        entries[:] = [e for e in entries if getv(e, "Feat") not in delfeats]
+        sid = entries[0]["__struct_id"] if entries else 1
+        for n in addfeats:
+            if n not in have:
+                entries.append({"__struct_id": sid,
+                                "Feat": {"type": "word", "value": n}})
+        touched = True
+    return touched
+
+
+# --- Module info (module.ifo.json) ------------------------------------------
+
+def module_ifo_path(root):
+    return os.path.join(root, "module.ifo.json")
+
+
+def render_module_form(d):
+    return (
+        "<form method='post' action='%s'>"
+        "<fieldset><legend>Module Info</legend><table>"
+        "<tr><td>Module Name</td><td><input type='text' name='Mod_Name' "
+        "value='%s' size='60'></td></tr>"
+        "<tr><td>Description</td><td><textarea name='Mod_Description' "
+        "rows='10' cols='70'>%s</textarea></td></tr>"
+        "</table></fieldset>"
+        "<input type='submit' value='Save'></form>" %
+        (purl("/module/apply"),
+         esc(loc_get(d, "Mod_Name")), esc(loc_get(d, "Mod_Description"))))
+
+
+def apply_module(root, form):
+    path = module_ifo_path(root)
+    d = json_load(path)
+    touched = False
+    for name in ("Mod_Name", "Mod_Description"):
+        val = form.get(name, [None])[0]
+        if val is not None and val != loc_get(d, name):
+            loc_set(d, name, val)
+            touched = True
+    if touched:
+        json_save(path, d)
+        invalidate(path)
+    return touched
+
+
+# --- Dashboard / project home / jobs pages ----------------------------------
+
+def upload_form_html():
+    """The browser-upload ingest form (shared by dashboard and start page)."""
+    return (
+        "<div class='card'><h2>New project from a module</h2>"
+        "<form method='post' action='%s' enctype='multipart/form-data'>"
+        "<p>Project name (slug): <input type='text' name='slug' "
+        "placeholder='(defaults to the .mod filename)'></p>"
+        "<p>Module file (.mod): <input type='file' name='module' "
+        "accept='.mod,.erf' required></p>"
+        "<p>Extra files (optional, dropped into unpacked/): "
+        "<input type='file' name='extra' multiple></p>"
+        "<input type='submit' value='Upload &amp; ingest'></form>"
+        "<p class='note'>Ingest runs <code>nwn-manager init</code> and unpacks "
+        "the module into its own project subdirectory.</p></div>"
+        % gurl("/projects/new"))
+
+
+PREREQ_NOTE = ("<p class='note'>Requires <code>nasher</code>, <code>nwn_gff</code>, "
+               "<code>nwn_script_comp</code> and <code>python3</code> on PATH "
+               "(build/wiki jobs fail loudly otherwise).</p>")
+
+
+def render_dashboard():
+    projs = list_projects()
+    cards = []
+    for p in projs:
+        pills = ["<span class='pill'>%d areas</span>" % p.area_count()]
+        if p.has_wiki():
+            pills.append("<span class='pill'>wiki</span>")
+        if p.built_mod_path():
+            pills.append("<span class='pill'>built</span>")
+        cards.append(
+            "<div class='card'><h3><a href='%s'>%s</a></h3>%s</div>" %
+            (gurl("/p/%s/" % p.slug), esc(p.slug), "".join(pills)))
+    listing = ("<div class='grid'>%s</div>" % "".join(cards) if cards else
+               "<p class='note'>No projects yet. Upload a .mod below to create one.</p>")
+    return page("NWN module console",
+                "<h2>Projects</h2>%s%s%s"
+                % (listing, upload_form_html(), PREREQ_NOTE))
+
+
+# --- Start page (ingestion) -------------------------------------------------
+
+def root_mod_files():
+    """Sorted .mod/.erf basenames the user has dropped into LANDING_DIR."""
+    if not LANDING_DIR or not os.path.isdir(LANDING_DIR):
+        return []
+    return [f for f in sorted(os.listdir(LANDING_DIR))
+            if f.lower().endswith((".mod", ".erf"))
+            and os.path.isfile(os.path.join(LANDING_DIR, f))]
+
+
+# Built-in fallback, used only if start.html is missing from LANDING_DIR.
+# The committed start.html is the canonical, user-editable page; both are
+# fully self-contained (a real upload form + JS that lists the drop folder),
+# so they work whether opened directly as a file or served at /start.
+FALLBACK_START_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ingest a module</title>
+<style>body{font-family:system-ui,sans-serif;margin:1.5em;max-width:60em;
+background:#1e1f24;color:#d8d9de}a{color:#7ab3ff}code,pre{background:#11131a;
+border-radius:4px}pre{padding:.7em .9em;overflow:auto}code{padding:.1em .35em}
+.card{border:1px solid #444;background:#25262c;border-radius:6px;padding:.8em 1.1em;
+margin:1em 0}input[type=text],input[type=file]{background:#2a2b31;color:#d8d9de;
+border:1px solid #555;padding:.3em}button{background:#39507a;color:#fff;border:0;
+padding:.5em 1.1em;cursor:pointer;border-radius:4px;font-size:1em}
+button.stop{background:#7a3939}.note{color:#9a9;font-style:italic}.ok{color:#8c6}</style>
+</head><body>
+<h1>Ingest a module</h1>
+<div class="card" id="startbox"><h2>1. Start the console</h2>
+<p>From the repository root<span id="repodir"></span>, run:</p>
+<pre><code>bin/nwn-manager console</code></pre>
+<p class="note">Leave it running, then reload this page.</p></div>
+<div class="card" id="runningbox" style="display:none">
+<p><span class="ok">&#9679; Console is running.</span>
+<form data-console="/shutdown" method="post" style="display:inline"
+onsubmit="return confirm('Stop the console server?')">
+<button type="submit" class="stop">Stop console</button></form></p></div>
+<div class="card"><h2>2. Upload a module</h2>
+<form data-console="/projects/new" method="post" enctype="multipart/form-data">
+<p>Module (.mod/.erf): <input type="file" name="module" accept=".mod,.erf" required></p>
+<p>Slug: <input type="text" name="slug" placeholder="(defaults to file name)"></p>
+<button type="submit">Upload &amp; ingest</button></form></div>
+<div class="card"><h2>&hellip; or from the drop folder</h2>
+<div id="rootmods"><p class="note">Loading...</p></div></div>
+<p class="note">(built-in fallback - restore start.html to customise)</p>
+<script>
+var CONSOLE_URL="http://127.0.0.1:8341";
+var served=location.protocol.indexOf("http")===0;
+var base=served?location.pathname.replace(/\\/start\\/?$/,""):CONSOLE_URL;
+function esc(s){return String(s).replace(/[&<>"']/g,function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c];});}
+document.querySelectorAll("form[data-console]").forEach(function(f){
+  f.setAttribute("action",base+f.getAttribute("data-console"));});
+if(!served){var dir=decodeURIComponent(location.pathname).replace(/\\/[^\\/]*$/,"");
+  if(dir)document.getElementById("repodir").textContent=" ("+dir+")";}
+fetch(base+"/api/root-mods").then(function(r){return r.json();}).then(function(d){
+  document.getElementById("startbox").style.display="none";
+  document.getElementById("runningbox").style.display="";
+  var el=document.getElementById("rootmods");
+  if(!d.mods||!d.mods.length){el.innerHTML="<p class='note'>No modules in the drop folder.</p>";return;}
+  el.innerHTML=d.mods.map(function(m){return "<form method='post' action='"+esc(base)
+    +"/projects/ingest-root'><input type='hidden' name='file' value='"+esc(m)
+    +"'><b>"+esc(m)+"</b> <input type='text' name='slug' value='"
+    +esc(m.replace(/\\.[^.]*$/,""))+"'> <button type='submit'>Ingest</button></form>";}).join("");
+}).catch(function(){document.getElementById("rootmods").innerHTML=
+  "<p class='note'>Start the console (step 1) to list the drop folder.</p>";});
+</script></body></html>"""
+
+
+def render_start():
+    """Serve the standalone start.html verbatim (fallback if the file is gone).
+
+    start.html is fully self-contained - it works opened directly as a file
+    (its upload form posts to the console; JS lists the drop folder via
+    /api/root-mods) and identically when served here at /start. Nothing is
+    templated, so what you edit in the file is exactly what is served.
+    """
+    if LANDING_DIR:
+        path = os.path.join(LANDING_DIR, "start.html")
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    return fh.read()
+            except OSError:
+                pass
+    return FALLBACK_START_HTML
+
+
+def render_project_home(proj):
+    n = proj.area_count()
+    src = proj.source_mod()
+    built = proj.built_mod_path()
+    rows = []
+    rows.append("<div class='card'><h3>Edit</h3>"
+                "<p><a href='%s'>Areas</a> - %d found - bulk-edit event "
+                "scripts, lighting/fog, tags/resrefs.</p>"
+                "<p><a href='%s'>Creatures</a> - %d blueprints - stats, "
+                "feats, appearance.</p>"
+                "<p><a href='%s'>Module info</a> - name &amp; description.</p></div>"
+                % (purl("/areas"), n, purl("/creatures"), proj.creature_count(),
+                   purl("/module")))
+
+    ingest = ("<form method='post' action='%s'>"
+              "<button type='submit'>Re-ingest from source .mod</button></form>"
+              % purl("/ingest"))
+    src_note = ("<p class='note'>Source: %s</p>" % esc(src) if src else
+                "<p class='warn'>No recorded source .mod (.nasher/source); "
+                "re-ingest unavailable.</p>")
+    rows.append("<div class='card'><h3>Ingest</h3><div class='actions'>%s</div>%s</div>"
+                % (ingest if src else "", src_note))
+
+    wiki_actions = ["<form method='post' action='%s'>"
+                    "<button type='submit'>Rebuild wiki</button></form>"
+                    % purl("/wiki")]
+    if proj.has_wiki():
+        wiki_actions.append("<a href='%s'>View wiki</a>" % purl("/wiki/"))
+        wiki_actions.append("<a href='%s'>View map</a>" % purl("/wiki/map/"))
+    rows.append("<div class='card'><h3>Wiki</h3><div class='actions'>%s</div>"
+                "<p class='note'>Runs <code>nwn-manager wiki</code> "
+                "(~30s), served here at %s.</p></div>"
+                % (" ".join(wiki_actions), esc(purl("/wiki/"))))
+
+    build_actions = ["<form method='post' action='%s'>"
+                     "<button type='submit'>Build module</button></form>"
+                     % purl("/build")]
+    if built:
+        build_actions.append("<a href='%s'>Download %s.mod</a>"
+                             % (purl("/download"), esc(proj.slug)))
+    built_note = ("<p class='note'>Last build: %s</p>" % esc(os.path.basename(built))
+                  if built else
+                  "<p class='note'>Not built yet.</p>")
+    rows.append("<div class='card'><h3>Build &amp; download</h3>"
+                "<div class='actions'>%s</div>%s"
+                "<p class='note'>Runs <code>nwn-manager repack</code> "
+                "(compile + pack, may take minutes).</p></div>"
+                % (" ".join(build_actions), built_note))
+
+    return page("Project: %s" % proj.slug, "<div class='grid'>%s</div>" % "".join(rows))
+
+
+def render_job_page(job):
+    head = "<meta http-equiv='refresh' content='2'>" if job.state == "running" else ""
+    tail = "\n".join(job.lines[-50:])
+    if job.state == "running":
+        status = "<p class='phase'>Running: %s</p>" % esc(job.phase)
+    elif job.state == "ok":
+        status = "<p class='ok phase'>Completed: %s</p>" % esc(job.phase)
+    else:
+        status = "<p class='err phase'>Failed: %s</p>" % esc(job.phase)
+    links = []
+    if job.state == "ok" and job.slug:
+        if job.kind == "build":
+            links.append("<a href='%s'>Download .mod</a>"
+                         % gurl("/p/%s/download" % job.slug))
+        elif job.kind == "wiki":
+            links.append("<a href='%s'>View wiki</a>"
+                         % gurl("/p/%s/wiki/" % job.slug))
+        links.append("<a href='%s'>Open project</a>" % gurl("/p/%s/" % job.slug))
+    elif job.slug:
+        links.append("<a href='%s'>Back to project</a>" % gurl("/p/%s/" % job.slug))
+    links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
+    body = ("%s<p>%s</p><pre class='log'>%s</pre><p>%s</p>" %
+            (status, esc(job.title), esc(tail) or "(no output yet)",
+             " &nbsp; ".join(links)))
+    return page("Job: %s" % job.title, body, head_extra=head)
+
+
+# --- HTTP handler -----------------------------------------------------------
+
+class Handler(BaseHTTPRequestHandler):
+    url_prefix = ""   # e.g. "/qedit" when reverse-proxied under a subpath
+
+    def _strip_proxy(self, path):
+        if self.url_prefix and path.startswith(self.url_prefix):
+            return path[len(self.url_prefix):] or "/"
+        return path
+
+    def _send(self, content, code=200):
+        data = content.encode()
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._client_gone()
+
+    def _send_bytes(self, data, ctype, code=200, extra_headers=None):
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            for k, v in (extra_headers or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._client_gone()
+
+    def _client_gone(self):
+        # The browser closed the connection (closed the tab, navigated away,
+        # double-submitted a form) before we finished sending the response.
+        # Any server-side work already done (e.g. a file write in apply_*)
+        # already completed - only response delivery failed, so there's
+        # nothing to recover; just log one quiet line instead of letting the
+        # exception surface as an unhandled-error traceback.
+        sys.stderr.write("%s - client disconnected before response finished\n"
+                         % self.address_string())
+
+    def _send_json(self, obj, code=200, cors=False):
+        headers = {"Access-Control-Allow-Origin": "*"} if cors else None
+        self._send_bytes(json.dumps(obj).encode(), "application/json",
+                         code=code, extra_headers=headers)
+
+    def _redirect(self, url):
+        try:
+            self.send_response(303)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self._client_gone()
+
+    def _form(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return urllib.parse.parse_qs(self.rfile.read(length).decode(),
+                                     keep_blank_values=True)
+
+    def log_message(self, fmt, *args):  # quieter default log
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    @staticmethod
+    def _split_project(path):
+        # "/p/<slug>/rest" -> (slug, "/rest")
+        rest = path[len("/p/"):]
+        slug, sep, tail = rest.partition("/")
+        return slug, ("/" + tail if sep else "/")
+
+    # -- GET ----------------------------------------------------------------
+    def do_GET(self):
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        raw = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(raw.query)
+        path = self._strip_proxy(raw.path)
+        try:
+            if SINGLE_MODE:
+                _req.project = SINGLE_PROJECT
+                self._project_get(SINGLE_PROJECT, path, query)
+                return
+            if path == "/":
+                self._send(render_dashboard())
+            elif path == "/start":
+                self._send(render_start())
+            elif path == "/api/root-mods":
+                # Consumed by start.html's JS; CORS-open so the page works even
+                # when opened directly as a file:// document.
+                self._send_json({"landing_dir": LANDING_DIR or "",
+                                 "mods": root_mod_files()}, cors=True)
+            elif path.startswith("/jobs/"):
+                job = get_job(path[len("/jobs/"):])
+                if not job:
+                    self._send(page("Unknown job", "<p class='err'>No such job.</p>"
+                                    "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 404)
+                else:
+                    self._send(render_job_page(job))
+            elif path.startswith("/p/"):
+                slug, sub = self._split_project(path)
+                proj = find_project(slug)
+                if not proj:
+                    self._send(page("Unknown project",
+                                    "<p class='err'>No such project.</p>"
+                                    "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 404)
+                    return
+                _req.slug = proj.slug
+                _req.project = proj
+                self._project_get(proj, sub, query)
+            else:
+                self._send(page("Not found", "<p>No such page.</p>"), 404)
+        except Exception as e:  # noqa: BLE001
+            self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
+
+    def _project_get(self, proj, sub, query):
+        root = proj.unpacked
+        if sub == "/":
+            if SINGLE_MODE:
+                self._send(page("NWN area editor",
+                    "<ul><li><a href='%s'>Areas</a> - %d found - bulk-edit "
+                    "event scripts, lighting/fog, tags/resrefs</li></ul>"
+                    "<p class='note'>Data dir: %s.</p>"
+                    % (purl("/areas"), proj.area_count(), esc(root))))
+            else:
+                self._send(render_project_home(proj))
+        elif sub == "/areas":
+            self._send(render_areas(root, query))
+        elif sub == "/areas/edit":
+            resrefs = [r for r in query.get("res", [])
+                       if os.path.exists(are_path(root, r))]
+            action = query.get("action", ["scripts"])[0]
+            if not resrefs:
+                self._send(page("Unknown area",
+                                "<p class='err'>No such area here.</p>"
+                                "<p><a href='%s'>Area list</a></p>" % purl("/areas")), 404)
+                return
+            if action == "remove_objects":
+                self._send(render_remove_objects_form(root, proj.git_root, resrefs))
+                return
+            render = {"scripts": render_scripts_form,
+                      "lighting": render_lighting_form,
+                      "music": render_music_form,
+                      "tags": render_tags_form}.get(action, render_scripts_form)
+            self._send(render(root, resrefs))
+        elif sub == "/areas/map":
+            self._send(render_area_map(proj))
+        elif sub == "/creatures":
+            self._send(render_creatures(root, query))
+        elif sub == "/creature":
+            res = query.get("res", [""])[0]
+            cpath = utc_path(root, res)
+            if not os.path.isfile(cpath):
+                self._send(page("Unknown creature",
+                                "<p class='err'>No such creature.</p>"
+                                "<p><a href='%s'>Creatures</a></p>"
+                                % purl("/creatures")), 404)
+                return
+            d = load_cached(cpath)
+            ident = "<input type='hidden' name='res' value='%s'>" % esc(res)
+            self._send(page("Creature: " + res,
+                            render_char_form(d, purl("/creature/apply"), ident)))
+        elif sub == "/module":
+            if not os.path.isfile(module_ifo_path(root)):
+                self._send(page("No module.ifo",
+                                "<p class='err'>No module.ifo.json here.</p>"), 404)
+                return
+            d = load_cached(module_ifo_path(root))
+            self._send(page("Module Info", render_module_form(d)))
+        elif sub == "/download":
+            self._serve_download(proj)
+        elif sub == "/wiki" or sub.startswith("/wiki/"):
+            rel = sub[len("/wiki"):].lstrip("/")
+            self._serve_static(proj.docs, rel)
+        else:
+            self._send(page("Not found", "<p>No such page.</p>"), 404)
+
+    # -- POST ---------------------------------------------------------------
+    def do_POST(self):
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        raw = urllib.parse.urlparse(self.path)
+        path = self._strip_proxy(raw.path)
+        try:
+            if path == "/shutdown":
+                self._shutdown()
+                return
+            if not SINGLE_MODE and path == "/projects/new":
+                self._create_project()
+                return
+            if not SINGLE_MODE and path == "/projects/ingest-root":
+                self._ingest_root(self._form())
+                return
+            if SINGLE_MODE:
+                _req.project = SINGLE_PROJECT
+                self._project_post(SINGLE_PROJECT, path, self._form())
+                return
+            if path.startswith("/p/"):
+                slug, sub = self._split_project(path)
+                proj = find_project(slug)
+                if not proj:
+                    self._send(page("Unknown project",
+                                    "<p class='err'>No such project.</p>"), 404)
+                    return
+                _req.slug = proj.slug
+                _req.project = proj
+                self._project_post(proj, sub, None)
+                return
+            self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except Exception as e:  # noqa: BLE001
+            self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
+
+    def _project_post(self, proj, sub, form):
+        # Lifecycle actions take no form body; area edits are urlencoded.
+        if sub in ("/ingest", "/wiki", "/build"):
+            self._project_action(proj, sub)
+            return
+        if form is None:
+            form = self._form()
+        root = proj.unpacked
+        if sub == "/areas/select":
+            resrefs = form.get("res", [])
+            action = form.get("action", [""])[0]
+            if not resrefs:
+                self._send(page("No areas selected",
+                                "<p><a href='%s'>Back</a></p>" % purl("/areas")))
+                return
+            if action == "remove_objects":
+                self._send(render_remove_objects_form(root, proj.git_root, resrefs))
+                return
+            render = {"scripts": render_scripts_form,
+                      "lighting": render_lighting_form,
+                      "music": render_music_form,
+                      "tags": render_tags_form}[action]
+            self._send(render(root, resrefs))
+        elif sub == "/areas/scripts/apply":
+            self._send(apply_scripts(root, form))
+        elif sub == "/areas/lighting/apply":
+            self._send(apply_lighting(root, form))
+        elif sub == "/areas/music/apply":
+            self._send(apply_music(root, form))
+        elif sub == "/areas/tags/apply":
+            self._send(apply_tags(root, proj.git_root, proj.gic_root, form))
+        elif sub == "/areas/objects/apply":
+            self._send(apply_remove_objects(root, proj.git_root, form))
+        elif sub == "/creature/apply":
+            res = form.get("res", [""])[0]
+            cpath = utc_path(root, res)
+            d = json_load(cpath)
+            if apply_char_edits(d, form):
+                json_save(cpath, d)
+                invalidate(cpath)
+            self._send(page("Saved", "<p class='ok'>%s saved.</p>"
+                            "<p><a href='%s'>Back</a></p>" %
+                            (esc(res), purl("/creature?res="
+                                            + urllib.parse.quote(res)))))
+        elif sub == "/module/apply":
+            touched = apply_module(root, form)
+            msg = "Module info saved." if touched else "No changes."
+            self._send(page("Saved", "<p class='ok'>%s</p>"
+                            "<p><a href='%s'>Back</a></p>"
+                            % (esc(msg), purl("/module"))))
+        else:
+            self._send(page("Not found", "<p>No such action.</p>"), 404)
+
+    def _project_action(self, proj, sub):
+        if sub == "/ingest":
+            job = Job("Re-ingest %s" % proj.slug,
+                      NWN_MANAGER + ["unpack"], cwd=proj.root,
+                      kind="ingest", slug=proj.slug)
+            job.phase = "unpacking module"
+        elif sub == "/wiki":
+            job = Job("Wiki %s" % proj.slug,
+                      NWN_MANAGER + ["wiki"], cwd=proj.root,
+                      kind="wiki", slug=proj.slug)
+            job.phase = "generating wiki"
+        else:  # /build
+            job = Job("Build %s" % proj.slug,
+                      NWN_MANAGER + ["repack"], cwd=proj.root,
+                      kind="build", slug=proj.slug)
+            job.phase = "starting build"
+        start_job(job)
+        self._redirect(gurl("/jobs/" + job.id))
+
+    def _shutdown(self):
+        """Stop the console server (the 'Stop console' button)."""
+        self._send(page("Console stopped",
+                        "<p class='ok'>The console has been stopped. You can "
+                        "close this tab.</p>"
+                        "<p class='note'>To start it again, run "
+                        "<code>bin/nwn-manager console</code> from the repository "
+                        "root, then reload.</p>"))
+
+        def _stop():
+            time.sleep(0.3)
+            try:
+                if SERVER is not None:
+                    SERVER.shutdown()
+                else:
+                    os._exit(0)
+            except Exception:  # noqa: BLE001
+                os._exit(0)
+
+        threading.Thread(target=_stop, daemon=True).start()
+
+    def _create_project(self):
+        fields, files = parse_multipart(self.headers, self.rfile)
+        mod_list = files.get("module", [])
+        if not mod_list or not mod_list[0][1]:
+            self._send(page("Upload error",
+                            "<p class='err'>No module file uploaded.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 400)
+            return
+        mod_filename, mod_bytes = mod_list[0]
+        want = fields.get("slug", [""])[0].strip()
+        slug = sanitize_slug(want or os.path.splitext(safe_basename(mod_filename))[0])
+        if not slug:
+            self._send(page("Upload error",
+                            "<p class='err'>Could not derive a project name.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % gurl("/")), 400)
+            return
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
+        if os.path.exists(proj_dir):
+            self._send(page("Upload error",
+                            "<p class='err'>Project %r already exists.</p>"
+                            "<p><a href='%s'>Dashboard</a></p>" % (slug, gurl("/"))), 409)
+            return
+        # Stage the uploaded .mod persistently (not in /tmp): `nwn-manager init`
+        # records this path as .nasher/source, which "Re-ingest from source"
+        # later re-reads - so it must outlive the ingest job.
+        uploads = os.path.join(PROJECTS_DIR, ".uploads")
+        os.makedirs(uploads, exist_ok=True)
+        mod_path = os.path.join(uploads, slug + ".mod")
+        with open(mod_path, "wb") as fh:
+            fh.write(mod_bytes)
+        stage = tempfile.mkdtemp(prefix="qnwn_up_")
+        extras = []  # (basename, staged_path)
+        for fn, data in files.get("extra", []):
+            if not fn or not data:
+                continue
+            bn = safe_basename(fn)
+            sp = os.path.join(stage, "extra_" + bn)
+            with open(sp, "wb") as fh:
+                fh.write(data)
+            extras.append((bn, sp))
+        self._start_ingest(slug, mod_path, extras, cleanup=stage)
+
+    def _ingest_root(self, form):
+        """Ingest a .mod/.erf the user dropped into LANDING_DIR (the repo root)."""
+        chosen = safe_basename(form.get("file", [""])[0])
+        want = form.get("slug", [""])[0].strip()
+        if chosen not in set(root_mod_files()):
+            self._send(page("Ingest error",
+                            "<p class='err'>No such module in the drop folder.</p>"
+                            "<p><a href='%s'>Back to start</a></p>" % gurl("/start")),
+                       400)
+            return
+        mod_path = os.path.join(LANDING_DIR, chosen)
+        slug = sanitize_slug(want or os.path.splitext(chosen)[0])
+        if not slug:
+            self._send(page("Ingest error",
+                            "<p class='err'>Could not derive a project name.</p>"
+                            "<p><a href='%s'>Back to start</a></p>" % gurl("/start")),
+                       400)
+            return
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
+        if os.path.exists(proj_dir):
+            self._send(page("Ingest error",
+                            "<p class='err'>Project %r already exists.</p>"
+                            "<p><a href='%s'>Back to start</a></p>"
+                            % (slug, gurl("/start"))), 409)
+            return
+        # No copy: the module intentionally lives in the root; `init` records it
+        # as .nasher/source so re-ingest keeps working while the file remains.
+        self._start_ingest(slug, mod_path, extras=[], cleanup=None)
+
+    def _start_ingest(self, slug, mod_path, extras=(), cleanup=None):
+        """Kick a background `nwn-manager init` job and redirect to its status.
+
+        extras: list of (basename, staged_path) copied into unpacked/ on success.
+        cleanup: optional temp dir removed once the job finishes.
+        """
+        proj_dir = os.path.join(PROJECTS_DIR, slug)
+
+        def on_success(job):
+            unpacked = os.path.join(proj_dir, "unpacked")
+            for bn, sp in extras:
+                try:
+                    shutil.copy(sp, os.path.join(unpacked, bn))
+                    job.add("[console] copied extra file %s -> unpacked/" % bn)
+                except OSError as exc:
+                    job.add("[console] WARN could not copy %s: %s" % (bn, exc))
+            if cleanup:
+                shutil.rmtree(cleanup, ignore_errors=True)
+
+        job = Job("Ingest %s" % slug,
+                  NWN_MANAGER + ["init", proj_dir, mod_path],
+                  cwd=PROJECTS_DIR, kind="ingest", slug=slug,
+                  on_success=on_success)
+        start_job(job)
+        self._redirect(gurl("/jobs/" + job.id))
+
+    # -- static/download helpers -------------------------------------------
+    def _serve_static(self, docroot, rel):
+        if not os.path.isdir(docroot):
+            self._send(page("No wiki",
+                            "<p class='err'>No wiki generated yet.</p>"
+                            "<p><a href='%s'>Rebuild it</a></p>" % purl("/")), 404)
+            return
+        rel = rel or "index.html"
+        docroot_real = os.path.realpath(docroot)
+        full = os.path.realpath(os.path.join(docroot, rel))
+        if full != docroot_real and not full.startswith(docroot_real + os.sep):
+            self._send(page("Forbidden", "<p class='err'>Path escape.</p>"), 403)
+            return
+        if os.path.isdir(full):
+            full = os.path.join(full, "index.html")
+        if not os.path.isfile(full):
+            self._send(page("Not found", "<p class='err'>No such wiki file.</p>"), 404)
+            return
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        with open(full, "rb") as fh:
+            self._send_bytes(fh.read(), ctype)
+
+    def _serve_download(self, proj):
+        mod = proj.built_mod_path()
+        if not mod or not os.path.isfile(mod):
+            self._send(page("Not built",
+                            "<p class='err'>No built .mod yet - build first.</p>"
+                            "<p><a href='%s'>Back</a></p>" % purl("/")), 404)
+            return
+        with open(mod, "rb") as fh:
+            self._send_bytes(
+                fh.read(), "application/octet-stream",
+                extra_headers={"Content-Disposition":
+                               'attachment; filename="%s.mod"' % proj.slug})
+
+
+def _find_nwn_manager(explicit):
+    """Returns an argv prefix (list) for invoking the nwn-manager wrapper.
+
+    On Windows the bash script can't be exec'd directly - CreateProcess has
+    no shebang support, so trying yields WinError 193 ("not a valid Win32
+    application"). nwn-manager.ps1 is preferred there instead, invoked
+    through powershell.exe. Elsewhere the bash script's shebang works as-is.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+
+    def as_argv(path):
+        if path and path.lower().endswith(".ps1"):
+            return ["powershell", "-ExecutionPolicy", "Bypass", "-File", path]
+        return [path]
+
+    if explicit:
+        return as_argv(explicit)
+
+    if os.name == "nt":
+        ps1 = os.path.join(here, "nwn-manager.ps1")
+        if os.path.isfile(ps1):
+            return as_argv(ps1)
+
+    candidates = [os.path.join(here, "nwn-manager")]
+    found = shutil.which("nwn-manager")
+    if found:
+        candidates.append(found)
+    for c in candidates:
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+            return as_argv(c)
+    return as_argv(candidates[0])  # best guess; jobs will surface the error if wrong
+
+
+def main():
+    global PROJECTS_DIR, SINGLE_MODE, SINGLE_PROJECT, NWN_MANAGER
+    global WIKI_SHELL, WIKI_BASE
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--projects-dir", default=None,
+                    help="root dir holding one subdirectory per project "
+                         "(multi-project console mode)")
+    ap.add_argument("--dir", default=None,
+                    help="legacy single-project mode: a directory of "
+                         "<resref>.are.json (the console dashboard is disabled)")
+    ap.add_argument("--git-dir", default=None,
+                    help="(single-dir mode) dir of <resref>.git.json")
+    ap.add_argument("--gic-dir", default=None,
+                    help="(single-dir mode) dir of <resref>.gic.json")
+    ap.add_argument("--port", type=int, default=8341)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--url-prefix", default="",
+                    help="serve under this path prefix (e.g. /qedit) when "
+                         "behind a reverse proxy")
+    ap.add_argument("--nav", action="append", default=[], metavar="LABEL=URL",
+                    help="extra nav-bar link (repeatable), e.g. --nav 'Wiki=/tfn-wiki/'")
+    ap.add_argument("--wiki-shell", default=None, metavar="FILE",
+                    help="path to an nwn-wiki assets/embed-shell.html; wraps "
+                         "every page in the wiki's header/nav/styles")
+    ap.add_argument("--wiki-base", default="", metavar="URL",
+                    help="public base URL of that wiki, substituted for the "
+                         "shell's {{ROOT}} asset paths")
+    ap.add_argument("--nwn-manager", default=None,
+                    help="path to the nwn-manager wrapper (default: sibling in bin/)")
+    ap.add_argument("--landing-dir", default=None,
+                    help="where start.html lives and dropped .mod files are "
+                         "scanned (default: the repo root above bin/)")
+    args = ap.parse_args()
+
+    global LANDING_DIR
+    NWN_MANAGER = _find_nwn_manager(args.nwn_manager)
+    LANDING_DIR = os.path.abspath(
+        args.landing_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    Handler.url_prefix = args.url_prefix.rstrip("/")
+    NAV_EXTRA[:] = [(label, url) for label, _, url in
+                    (n.partition("=") for n in args.nav) if url]
+    if args.wiki_shell:
+        with open(args.wiki_shell, encoding="utf-8") as fh:
+            WIKI_SHELL = fh.read()
+        WIKI_BASE = args.wiki_base.rstrip("/")
+
+    if args.dir and not args.projects_dir:
+        SINGLE_MODE = True
+        d = os.path.abspath(args.dir)
+        SINGLE_PROJECT = Project(os.path.dirname(d) or d, unpacked=d,
+                                 git_root=args.git_dir, gic_root=args.gic_dir)
+        print("single-project dir: %s" % d)
+    else:
+        if not args.projects_dir:
+            ap.error("one of --projects-dir (console) or --dir (single) is required")
+        PROJECTS_DIR = os.path.abspath(args.projects_dir)
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+        print("projects dir: %s" % PROJECTS_DIR)
+
+    global SERVER
+    print("nwn-manager: %s" % " ".join(NWN_MANAGER))
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    SERVER = srv
+    base = "http://%s:%d%s" % (args.host, args.port, Handler.url_prefix)
+    print("Serving on %s/ (Ctrl-C to stop)" % base, flush=True)
+    if not SINGLE_MODE:
+        print("  ingest start page: %s/start   (drop folder: %s)"
+              % (base, LANDING_DIR), flush=True)
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
