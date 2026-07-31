@@ -14416,6 +14416,15 @@ def generate_module_index(
         app_raw = fld(c, "Appearance_Type") if fld(c, "Appearance_Type") not in (None, "") \
             else fld(bp, "Appearance_Type")
         app_id = _try_int(app_raw, -1) if app_raw not in (None, "") else -1
+        classlist_raw = list_items(c.get("ClassList")) or list_items(bp.get("ClassList"))
+        class_list = [
+            {
+                "class_id": _try_int(fld(cl, "Class"), -1),
+                "class": class_name(fld(cl, "Class")),
+                "level": _try_int(fld(cl, "ClassLevel"), 0),
+            }
+            for cl in classlist_raw
+        ]
         is_variant = bp_rr != can_rr
         locs = db.canonical_locations.get(can_rr, [])
         loc_list = [
@@ -14438,6 +14447,7 @@ def generate_module_index(
             "race": race_name(race_raw),
             "appearance_id": app_id,
             "appearance_name": appearance_name(app_id) if app_id >= 0 else "",
+            "classes": class_list,
             "faction_id": fid,
             "faction_name": db.faction_name(fid) if fid is not None else "",
             "wiki_url": _cu(can_rr),
