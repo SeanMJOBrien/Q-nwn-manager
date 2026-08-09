@@ -1766,11 +1766,17 @@ def creature_summary(d):
 
 def render_creatures(root, query):
     q = (query.get("q", [""])[0]).lower()
-    body = ["<form method='get'>Filter: <input type='text' name='q' value='%s'>"
-            "<input type='submit' value='Apply'></form>" % esc(q),
-            "<table><tr>%s%s%s%s%s%s</tr>" %
-            (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"),
-             sth("Appearance"), sth("Lootable"))]
+    body = [
+        "<form method='get'>Filter: <input type='text' name='q' value='%s'>"
+        "<input type='submit' value='Apply'></form>" % esc(q),
+        "<form method='post' action='%s'>" % purl("/creatures/select"),
+        "<p><input type='submit' value='Edit settings for selected'></p>",
+        "<table><tr><th><input type='checkbox' "
+        "onclick=\"document.querySelectorAll('input[name=res]')"
+        ".forEach(c=>c.checked=this.checked)\"></th>"
+        "%s%s%s%s%s%s</tr>" %
+        (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"),
+         sth("Appearance"), sth("Lootable"))]
     count = 0
     for res in creature_resrefs(root):
         d = load_cached(utc_path(root, res))
@@ -1780,14 +1786,126 @@ def render_creatures(root, query):
                 and q not in s["tag"].lower():
             continue
         count += 1
-        body.append("<tr><td><a href='%s'>%s</a></td>"
+        body.append("<tr><td><input type='checkbox' name='res' value='%s'></td>"
+                    "<td><a href='%s'>%s</a></td>"
                     "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
-                    (purl("/creature?res=" + urllib.parse.quote(res)), esc(res),
+                    (esc(res), purl("/creature?res=" + urllib.parse.quote(res)), esc(res),
                      esc(name), esc(s["tag"]), esc(s["classes"]),
                      esc(s["appearance"]), "Yes" if s["lootable"] else "No"))
-    body.append("</table><p class='note'>%d creatures shown.</p>" % count)
+    body.append("</table></form><p class='note'>%d creatures shown.</p>" % count)
     body.append(SORT_SCRIPT)
     return page("Creature blueprints (.utc)", "".join(body))
+
+
+# --- Bulk edit creature settings (scripts + Advanced-tab flags) ------------
+# GFF field name -> the toolset's own display label for that event script.
+CREATURE_SCRIPT_FIELDS = [
+    ("ScriptHeartbeat", "OnHeartbeat"), ("ScriptOnNotice", "OnPerception"),
+    ("ScriptSpellAt", "OnSpellCastAt"), ("ScriptAttacked", "OnPhysicalAttacked"),
+    ("ScriptDamaged", "OnDamaged"), ("ScriptDeath", "OnDeath"),
+    ("ScriptDisturbed", "OnDisturbed"), ("ScriptEndRound", "OnEndRound"),
+    ("ScriptDialogue", "OnConversation"), ("ScriptSpawn", "OnSpawn"),
+    ("ScriptRested", "OnRested"), ("ScriptUserDefine", "OnUserDefined"),
+    ("ScriptOnBlocked", "OnBlocked"),
+]
+
+# (field, toolset label, default-when-absent) - all byte flags from the
+# creature's Advanced tab.
+CREATURE_FLAG_FIELDS = [
+    ("Plot", "Plot", 0),
+    ("Lootable", "Leaves lootable corpse", 1),
+    ("NoPermDeath", "No permanent death", 0),
+    ("IsImmortal", "Immortal", 0),
+]
+
+
+def _creature_field_summary(root, resrefs, field, default, fmt):
+    """Distinct current values of one field across a selection, for display
+    next to its bulk-edit input so "leave unchanged" isn't a guess."""
+    vals = sorted({fmt(getv(load_cached(utc_path(root, r)), field, default))
+                  for r in resrefs})
+    return ", ".join(vals)
+
+
+def render_creature_settings_form(root, resrefs):
+    script_rows = "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' "
+        "placeholder='(leave unchanged)'></td><td class='note'>%s</td></tr>" %
+        (label, field, esc(_creature_field_summary(
+            root, resrefs, field, "", lambda v: v or "(none)")))
+        for field, label in CREATURE_SCRIPT_FIELDS)
+
+    flag_rows = "".join(
+        "<tr><td>%s</td><td><select name='%s'>"
+        "<option value=''>(leave unchanged)</option>"
+        "<option value='1'>Yes</option><option value='0'>No</option>"
+        "</select></td><td class='note'>%s</td></tr>" %
+        (label, field, esc(_creature_field_summary(
+            root, resrefs, field, default, lambda v: "Yes" if v else "No")))
+        for field, label, default in CREATURE_FLAG_FIELDS)
+
+    decay_current = esc(_creature_field_summary(
+        root, resrefs, "DecayTime", 5000, str))
+
+    body = (
+        "<p>Editing <b>%d</b> creature(s): %s</p>"
+        "<form method='post' action='%s'>%s"
+        "<fieldset><legend>Scripts</legend><table>"
+        "<tr><th>Event</th><th>New script resref</th><th>Current value(s)</th></tr>"
+        "%s</table>"
+        "<p class='note'>Blank = leave unchanged. Enter <b>-</b> to clear a "
+        "script. Max 16 chars, no extension.</p></fieldset>"
+        "<fieldset><legend>Flags</legend><table>"
+        "<tr><th>Flag</th><th>New value</th><th>Current value(s)</th></tr>"
+        "%s</table></fieldset>"
+        "<fieldset><legend>Decay time</legend><table>"
+        "<tr><td>Decay time (ms)</td>"
+        "<td><input type='text' name='DecayTime' placeholder='(leave unchanged)'></td>"
+        "<td class='note'>%s</td></tr></table>"
+        "<p class='note'>How long a lootable corpse stays before disappearing, "
+        "in milliseconds.</p></fieldset>"
+        "<input type='submit' value='Apply to selected creatures'> "
+        "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+        (len(resrefs), esc(", ".join(resrefs)), purl("/creatures/settings/apply"),
+         hidden_resrefs(resrefs), script_rows, flag_rows, decay_current,
+         purl("/creatures")))
+    return page("Bulk edit creature settings", body)
+
+
+def apply_creature_settings(root, form):
+    resrefs = [r for r in form.get("res", []) if os.path.isfile(utc_path(root, r))]
+    changed = []
+    for res in resrefs:
+        path = utc_path(root, res)
+        d = json_load(path)
+        touched = False
+        for field, _label in CREATURE_SCRIPT_FIELDS:
+            val = form.get(field, [""])[0].strip()
+            if not val:
+                continue
+            new = "" if val == "-" else val.lower()[:16]
+            if getv(d, field) != new:
+                setv(d, field, new, "resref")
+                touched = True
+        for field, _label, default in CREATURE_FLAG_FIELDS:
+            val = form.get(field, [""])[0]
+            if not val:
+                continue
+            new = int(val)
+            if getv(d, field, default) != new:
+                setv(d, field, new, "byte")
+                touched = True
+        decay = form.get("DecayTime", [""])[0].strip()
+        if decay:
+            new = int(decay)
+            if getv(d, "DecayTime", 5000) != new:
+                setv(d, "DecayTime", new, "dword")
+                touched = True
+        if touched:
+            json_save(path, d)
+            invalidate(path)
+            changed.append(res)
+    return result_page("Creature settings updated", changed, resrefs)
 
 
 def item_name(item):
@@ -2495,6 +2613,16 @@ class Handler(BaseHTTPRequestHandler):
                             "<p><a href='%s'>Back</a></p>" %
                             (esc(res), purl("/creature?res="
                                             + urllib.parse.quote(res)))))
+        elif sub == "/creatures/select":
+            resrefs = [r for r in form.get("res", [])
+                       if os.path.isfile(utc_path(root, r))]
+            if not resrefs:
+                self._send(page("No creatures selected",
+                                "<p><a href='%s'>Back</a></p>" % purl("/creatures")))
+                return
+            self._send(render_creature_settings_form(root, resrefs))
+        elif sub == "/creatures/settings/apply":
+            self._send(apply_creature_settings(root, form))
         elif sub == "/module/apply":
             touched = apply_module(root, form)
             msg = "Module info saved." if touched else "No changes."
