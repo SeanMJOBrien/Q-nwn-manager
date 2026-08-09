@@ -74,19 +74,19 @@ class LootableEditTests(unittest.TestCase):
 
     def test_render_char_form_selects_yes_when_lootable(self):
         d = make_utc("guard6", lootable=1)
-        html = CONSOLE.render_char_form(d, "/creature/apply", "")
+        html = CONSOLE.render_char_form(d, "/creature/apply", "", ".")
         self.assertIn("<option value='1' selected>Yes</option>", html)
         self.assertIn("<option value='0'>No</option>", html)
 
     def test_render_char_form_selects_no_when_not_lootable(self):
         d = make_utc("guard7", lootable=0)
-        html = CONSOLE.render_char_form(d, "/creature/apply", "")
+        html = CONSOLE.render_char_form(d, "/creature/apply", "", ".")
         self.assertIn("<option value='0' selected>No</option>", html)
         self.assertIn("<option value='1'>Yes</option>", html)
 
     def test_render_char_form_defaults_to_yes_when_field_absent(self):
         d = make_utc("guard8")
-        html = CONSOLE.render_char_form(d, "/creature/apply", "")
+        html = CONSOLE.render_char_form(d, "/creature/apply", "", ".")
         self.assertIn("<option value='1' selected>Yes</option>", html)
 
 
