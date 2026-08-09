@@ -1759,6 +1759,8 @@ def creature_summary(d):
         "first": loc_get(d, "FirstName"), "last": loc_get(d, "LastName"),
         "tag": getv(d, "Tag", ""), "classes": classes,
         "appearance": getv(d, "Appearance_Type", ""),
+        # Missing field means the toolset/engine default, which is lootable.
+        "lootable": bool(getv(d, "Lootable", 1)),
     }
 
 
@@ -1766,8 +1768,9 @@ def render_creatures(root, query):
     q = (query.get("q", [""])[0]).lower()
     body = ["<form method='get'>Filter: <input type='text' name='q' value='%s'>"
             "<input type='submit' value='Apply'></form>" % esc(q),
-            "<table><tr>%s%s%s%s%s</tr>" %
-            (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"), sth("Appearance"))]
+            "<table><tr>%s%s%s%s%s%s</tr>" %
+            (sth("ResRef"), sth("Name"), sth("Tag"), sth("Classes"),
+             sth("Appearance"), sth("Lootable"))]
     count = 0
     for res in creature_resrefs(root):
         d = load_cached(utc_path(root, res))
@@ -1778,10 +1781,10 @@ def render_creatures(root, query):
             continue
         count += 1
         body.append("<tr><td><a href='%s'>%s</a></td>"
-                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                    "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
                     (purl("/creature?res=" + urllib.parse.quote(res)), esc(res),
                      esc(name), esc(s["tag"]), esc(s["classes"]),
-                     esc(s["appearance"])))
+                     esc(s["appearance"]), "Yes" if s["lootable"] else "No"))
     body.append("</table><p class='note'>%d creatures shown.</p>" % count)
     body.append(SORT_SCRIPT)
     return page("Creature blueprints (.utc)", "".join(body))
@@ -1841,6 +1844,14 @@ def render_char_form(d, action, ident_html):
         (n, n, esc(feat_name(n)))
         for n in feats)
 
+    # Missing field means the toolset/engine default, which is lootable.
+    lootable = bool(getv(d, "Lootable", 1))
+    loot_select = (
+        "<select name='Lootable'>"
+        "<option value='1'%s>Yes</option><option value='0'%s>No</option>"
+        "</select>" %
+        (" selected" if lootable else "", " selected" if not lootable else ""))
+
     return (
         "<form method='post' action='%s'>%s"
         "<fieldset><legend>Identity</legend><table>"
@@ -1850,6 +1861,11 @@ def render_char_form(d, action, ident_html):
         "</table></fieldset>"
         "<fieldset><legend>Abilities</legend><table>%s</table></fieldset>"
         "<fieldset><legend>Stats</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Loot</legend><table>"
+        "<tr><td>Lootable</td><td>%s</td></tr></table>"
+        "<p class='note'>No means the death inventory screen never opens for "
+        "this creature - its equipped/carried items can't be looted or "
+        "dropped when it dies.</p></fieldset>"
         "<fieldset><legend>Appearance</legend>%s<table>%s</table>"
         "<p class='note'>Only fields present in this file are shown; static-"
         "appearance creatures have no head/body-part fields. IDs come from "
@@ -1863,7 +1879,7 @@ def render_char_form(d, action, ident_html):
         "<input type='submit' value='Save'></form>" %
         (action, ident_html, esc(loc_get(d, "FirstName")),
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
-         abil, stats, portrait, appear, render_equipment(d), len(feats),
+         abil, stats, loot_select, portrait, appear, render_equipment(d), len(feats),
          feat_boxes or "<p class='note'>none</p>"))
 
 
@@ -1888,6 +1904,13 @@ def apply_char_edits(d, form):
         new = float(val) if gff_type == "float" else int(val)
         if getv(d, f) != new:
             setv(d, f, new, gff_type)
+            touched = True
+
+    lootable = form.get("Lootable", [None])[0]
+    if lootable is not None:
+        new = int(lootable)
+        if getv(d, "Lootable", 1) != new:
+            setv(d, "Lootable", new, "byte")
             touched = True
 
     delfeats = {int(x) for x in form.get("delfeat", [])}
