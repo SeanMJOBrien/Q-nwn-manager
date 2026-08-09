@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONSOLE = SourceFileLoader(
-    "nwn_area_editor_under_test", str(REPO_ROOT / "bin" / "nwn-area-editor")
+    "nwn_area_editor_under_test__test_creature_equipment", str(REPO_ROOT / "bin" / "nwn-area-editor")
 ).load_module()
 
 
