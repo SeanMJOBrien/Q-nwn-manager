@@ -1819,6 +1819,63 @@ CREATURE_FLAG_FIELDS = [
 ]
 
 
+def sync_placed_instances(root, git_root, category, resref, d,
+                           scalar_fields=(), item_subfields=()):
+    """Copy fields from an updated blueprint `d` onto every already-placed
+    instance (across all areas' .git.json) whose TemplateResRef matches
+    resref. NWN bakes a full copy of the blueprint struct into an instance
+    at placement time, so editing only the blueprint never affects anything
+    already placed in the world - a blueprint-only edit of e.g. Lootable or
+    DecayTime shows no change in-game until placed instances are patched too.
+
+    scalar_fields: [(field_name, gff_type), ...] copied verbatim from d.
+    item_subfields: e.g. ["Equip_ItemList", "ItemList"] - copies each
+    item's Dropable flag across by (index, resref), skipping any index
+    where the instance's item resref no longer matches the blueprint's
+    (inventory drifted after placement - don't risk touching an unrelated
+    item).
+    Returns the list of area resrefs actually touched.
+    """
+    if not scalar_fields and not item_subfields:
+        return []
+    list_field = OBJECT_LIST_FIELDS[category]
+    resref = resref.lower()
+    touched_areas = []
+    for ares in area_resrefs(root):
+        gpath = git_path(git_root, ares)
+        if not os.path.isfile(gpath):
+            continue
+        g = load_cached(gpath)
+        area_touched = False
+        for entry in getv(g, list_field, []):
+            if getv(entry, "TemplateResRef", "").lower() != resref:
+                continue
+            for fname, gff_type in scalar_fields:
+                new_val = getv(d, fname)
+                if getv(entry, fname) != new_val:
+                    setv(entry, fname, new_val, gff_type)
+                    area_touched = True
+            for subfield in item_subfields:
+                res_field = "EquippedRes" if subfield == "Equip_ItemList" else "InventoryRes"
+                bp_items = getv(d, subfield, [])
+                inst_items = getv(entry, subfield, [])
+                for idx, bp_item in enumerate(bp_items):
+                    if idx >= len(inst_items):
+                        continue
+                    if getv(inst_items[idx], res_field, "").lower() != \
+                            getv(bp_item, res_field, "").lower():
+                        continue
+                    new_drop = getv(bp_item, "Dropable", 1)
+                    if getv(inst_items[idx], "Dropable", 1) != new_drop:
+                        setv(inst_items[idx], "Dropable", new_drop, "byte")
+                        area_touched = True
+        if area_touched:
+            json_save(gpath, g)
+            invalidate(gpath)
+            touched_areas.append(ares)
+    return touched_areas
+
+
 def _creature_field_summary(root, resrefs, field, default, fmt):
     """Distinct current values of one field across a selection, for display
     next to its bulk-edit input so "leave unchanged" isn't a guess."""
@@ -1864,6 +1921,9 @@ def render_creature_settings_form(root, resrefs):
         "<td class='note'>%s</td></tr></table>"
         "<p class='note'>How long a lootable corpse stays before disappearing, "
         "in milliseconds.</p></fieldset>"
+        "<p class='note'>Also updates any copies of these creatures already "
+        "placed in an area - editing the blueprint alone has no effect on "
+        "instances placed before this edit.</p>"
         "<input type='submit' value='Apply to selected creatures'> "
         "<a class='cancel-link' href='%s'>Cancel</a></form>" %
         (len(resrefs), esc(", ".join(resrefs)), purl("/creatures/settings/apply"),
@@ -1872,9 +1932,24 @@ def render_creature_settings_form(root, resrefs):
     return page("Bulk edit creature settings", body)
 
 
-def apply_creature_settings(root, form):
+def apply_creature_settings(root, git_root, form):
     resrefs = [r for r in form.get("res", []) if os.path.isfile(utc_path(root, r))]
     changed = []
+    # Fields actually submitted this call (regardless of whether any one
+    # creature's blueprint value needed changing) - these also get pushed
+    # onto matching placed instances below, so a resref whose blueprint
+    # already had the "new" value from a prior desynced edit still gets its
+    # placed copies healed.
+    submitted_scalar_fields = []
+    for field, _label in CREATURE_SCRIPT_FIELDS:
+        if form.get(field, [""])[0].strip():
+            submitted_scalar_fields.append((field, "resref"))
+    for field, _label, _default in CREATURE_FLAG_FIELDS:
+        if form.get(field, [""])[0]:
+            submitted_scalar_fields.append((field, "byte"))
+    if form.get("DecayTime", [""])[0].strip():
+        submitted_scalar_fields.append(("DecayTime", "dword"))
+
     for res in resrefs:
         path = utc_path(root, res)
         d = json_load(path)
@@ -1905,6 +1980,9 @@ def apply_creature_settings(root, form):
             json_save(path, d)
             invalidate(path)
             changed.append(res)
+        if submitted_scalar_fields:
+            sync_placed_instances(root, git_root, "creature", res, d,
+                                   submitted_scalar_fields)
     return result_page("Creature settings updated", changed, resrefs)
 
 
@@ -1981,7 +2059,8 @@ def render_equipment(root, d):
     note = ("<p class='note'>Dropable controls whether that specific item "
             "can be taken when this creature is looted - separate from the "
             "creature's own Lootable flag above, which gates whether the "
-            "death inventory screen opens at all.</p>")
+            "death inventory screen opens at all. Saving also updates any "
+            "copies of this creature already placed in an area.</p>")
     return equip_html + carried_html + note
 
 
@@ -2609,6 +2688,20 @@ class Handler(BaseHTTPRequestHandler):
             if apply_char_edits(d, form):
                 json_save(cpath, d)
                 invalidate(cpath)
+            # Also heal any already-placed copies of this creature across
+            # all areas - a blueprint-only edit never reaches an instance
+            # that was placed before the edit (see sync_placed_instances).
+            scalar_fields = []
+            if "Lootable" in form:
+                scalar_fields.append(("Lootable", "byte"))
+            item_subfields = []
+            if "dropable_equip_present" in form:
+                item_subfields.append("Equip_ItemList")
+            if "dropable_carried_present" in form:
+                item_subfields.append("ItemList")
+            if scalar_fields or item_subfields:
+                sync_placed_instances(root, proj.git_root, "creature", res, d,
+                                       scalar_fields, item_subfields)
             self._send(page("Saved", "<p class='ok'>%s saved.</p>"
                             "<p><a href='%s'>Back</a></p>" %
                             (esc(res), purl("/creature?res="
@@ -2622,7 +2715,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send(render_creature_settings_form(root, resrefs))
         elif sub == "/creatures/settings/apply":
-            self._send(apply_creature_settings(root, form))
+            self._send(apply_creature_settings(root, proj.git_root, form))
         elif sub == "/module/apply":
             touched = apply_module(root, form)
             msg = "Module info saved." if touched else "No changes."
