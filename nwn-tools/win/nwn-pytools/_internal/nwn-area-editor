@@ -1794,38 +1794,80 @@ def item_name(item):
     return loc_get(item, "LocalizedName") or loc_get(item, "LocName") or ""
 
 
-def render_equipment(d):
+def uti_path(root, res):
+    return os.path.join(root, res + ".uti.json")
+
+
+def resolved_item_name(root, item, resref):
+    """Display name for a carried/equipped item entry. Unlike a loose ground
+    item, a creature/placeable's inline Equip_ItemList/ItemList entry is
+    often just a resref stub (EquippedRes/InventoryRes) with no
+    LocalizedName of its own - fall back to the referenced .uti blueprint
+    when the entry itself has no name."""
+    name = item_name(item)
+    if name or not resref:
+        return name
+    try:
+        return item_name(load_cached(uti_path(root, resref)))
+    except OSError:
+        return ""
+
+
+def _dropable_checkbox(form_key, idx, item):
+    # Missing field means the toolset/engine default, which is dropable.
+    dropable = bool(getv(item, "Dropable", 1))
+    return ("<input type='checkbox' name='%s' value='%d'%s>" %
+            (form_key, idx, " checked" if dropable else ""))
+
+
+def render_equipment(root, d):
     equipped = getv(d, "Equip_ItemList", [])
     carried = getv(d, "ItemList", [])
 
     if equipped:
+        # Sort for display (by slot), but keep each item's original list
+        # index for the Dropable checkbox - apply_char_edits looks items up
+        # by that index against the on-disk (unsorted) list.
+        indexed = sorted(enumerate(equipped),
+                         key=lambda p: p[1].get("__struct_id", 0))
         rows = []
-        for item in sorted(equipped, key=lambda i: i.get("__struct_id", 0)):
+        for idx, item in indexed:
             slot_id = item.get("__struct_id", 0)
             slot = EQUIP_SLOT_NAMES.get(slot_id, "Slot %s" % slot_id)
-            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" %
-                        (esc(slot), esc(getv(item, "EquippedRes", "")),
-                         esc(item_name(item))))
-        equip_html = ("<table><tr><th>Slot</th><th>ResRef</th><th>Name</th></tr>"
-                     "%s</table>" % "".join(rows))
+            resref = getv(item, "EquippedRes", "")
+            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                        (esc(slot), esc(resref),
+                         esc(resolved_item_name(root, item, resref)),
+                         _dropable_checkbox("dropable_equip", idx, item)))
+        equip_html = ("<input type='hidden' name='dropable_equip_present' value='1'>"
+                     "<table><tr><th>Slot</th><th>ResRef</th><th>Name</th>"
+                     "<th>Dropable</th></tr>%s</table>" % "".join(rows))
     else:
         equip_html = "<p class='note'>nothing equipped</p>"
 
     if carried:
-        rows = "".join(
-            "<tr><td>%s</td><td>%s</td></tr>" %
-            (esc(getv(item, "InventoryRes", "")), esc(item_name(item)))
-            for item in carried)
-        carried_html = ("<p>%d item%s carried:</p>"
-                        "<table><tr><th>ResRef</th><th>Name</th></tr>%s</table>" %
-                        (len(carried), "" if len(carried) == 1 else "s", rows))
+        rows = []
+        for idx, item in enumerate(carried):
+            resref = getv(item, "InventoryRes", "")
+            rows.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" %
+                        (esc(resref), esc(resolved_item_name(root, item, resref)),
+                         _dropable_checkbox("dropable_carried", idx, item)))
+        carried_html = ("<input type='hidden' name='dropable_carried_present' value='1'>"
+                        "<p>%d item%s carried:</p>"
+                        "<table><tr><th>ResRef</th><th>Name</th><th>Dropable</th></tr>"
+                        "%s</table>" %
+                        (len(carried), "" if len(carried) == 1 else "s", "".join(rows)))
     else:
         carried_html = "<p class='note'>nothing carried</p>"
 
-    return equip_html + carried_html
+    note = ("<p class='note'>Dropable controls whether that specific item "
+            "can be taken when this creature is looted - separate from the "
+            "creature's own Lootable flag above, which gates whether the "
+            "death inventory screen opens at all.</p>")
+    return equip_html + carried_html + note
 
 
-def render_char_form(d, action, ident_html):
+def render_char_form(d, action, ident_html, root):
     def num_input(f):
         return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
                 "</td></tr>" % (f, f, esc(getv(d, f, ""))))
@@ -1879,7 +1921,7 @@ def render_char_form(d, action, ident_html):
         "<input type='submit' value='Save'></form>" %
         (action, ident_html, esc(loc_get(d, "FirstName")),
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
-         abil, stats, loot_select, portrait, appear, render_equipment(d), len(feats),
+         abil, stats, loot_select, portrait, appear, render_equipment(root, d), len(feats),
          feat_boxes or "<p class='note'>none</p>"))
 
 
@@ -1912,6 +1954,25 @@ def apply_char_edits(d, form):
         if getv(d, "Lootable", 1) != new:
             setv(d, "Lootable", new, "byte")
             touched = True
+
+    # Checkboxes only submit when checked, so a hidden marker distinguishes
+    # "no items to edit" (marker absent - leave everything alone) from "all
+    # boxes explicitly unchecked" (marker present, checked set empty - every
+    # item's Dropable becomes 0).
+    if "dropable_equip_present" in form:
+        checked = {int(x) for x in form.get("dropable_equip", [])}
+        for idx, item in enumerate(getv(d, "Equip_ItemList", [])):
+            new = 1 if idx in checked else 0
+            if getv(item, "Dropable", 1) != new:
+                setv(item, "Dropable", new, "byte")
+                touched = True
+    if "dropable_carried_present" in form:
+        checked = {int(x) for x in form.get("dropable_carried", [])}
+        for idx, item in enumerate(getv(d, "ItemList", [])):
+            new = 1 if idx in checked else 0
+            if getv(item, "Dropable", 1) != new:
+                setv(item, "Dropable", new, "byte")
+                touched = True
 
     delfeats = {int(x) for x in form.get("delfeat", [])}
     addfeats = [int(x) for x in
@@ -2338,7 +2399,7 @@ class Handler(BaseHTTPRequestHandler):
             d = load_cached(cpath)
             ident = "<input type='hidden' name='res' value='%s'>" % esc(res)
             self._send(page("Creature: " + res,
-                            render_char_form(d, purl("/creature/apply"), ident)))
+                            render_char_form(d, purl("/creature/apply"), ident, root)))
         elif sub == "/module":
             if not os.path.isfile(module_ifo_path(root)):
                 self._send(page("No module.ifo",
