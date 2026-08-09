@@ -713,6 +713,7 @@ def render_areas(root, query):
         "<button form='areasSelect' name='action' value='lighting'>Edit lighting/fog</button>"
         "<button form='areasSelect' name='action' value='music'>Edit music</button>"
         "<button form='areasSelect' name='action' value='tags'>Edit tags</button>"
+        "<button form='areasSelect' name='action' value='edit_creatures'>Edit placed creatures</button>"
         "<button form='areasSelect' name='action' value='remove_objects'>Remove objects</button>"
         "</div></div>",
         "<form id='areasSelect' method='post' action='%s'>" % purl("/areas/select"),
@@ -1549,6 +1550,7 @@ MAP_PAGE = """<!doctype html>
  <a id="ptags" target="_blank">Tag / resref</a>
  <a id="pscripts" target="_blank">Event scripts</a>
  <a id="pobjects" target="_blank">Remove objects</a>
+ <a id="pcreatures" target="_blank">Edit placed creatures</a>
  <a id="plist" target="_blank">Open in editor area list</a></div>
 <script>
 const BASE=%(base)s;
@@ -1599,9 +1601,10 @@ stage.addEventListener('click',e=>{
  document.getElementById('ptags').href=BASE+'/areas/edit?action=tags&res='+q;
  document.getElementById('pscripts').href=BASE+'/areas/edit?action=scripts&res='+q;
  document.getElementById('pobjects').href=BASE+'/areas/edit?action=remove_objects&res='+q;
+ document.getElementById('pcreatures').href=BASE+'/areas/edit?action=edit_creatures&res='+q;
  document.getElementById('plist').href=BASE+'/areas?q='+q;
  popup.style.left=Math.min(e.clientX+8,innerWidth-260)+'px';
- popup.style.top=Math.min(e.clientY+8,innerHeight-190)+'px';
+ popup.style.top=Math.min(e.clientY+8,innerHeight-210)+'px';
  popup.style.display='block';});
 popup.querySelector('.close').onclick=()=>popup.style.display='none';
 // slider runs 100:1 (far left, whole-module overview) to 1:1 (far right,
@@ -2188,6 +2191,149 @@ def apply_char_edits(d, form):
     return touched
 
 
+# --- Edit an already-placed creature instance directly (area .git.json) ----
+# Companion to the blueprint editor above: sync_placed_instances() pushes a
+# blueprint edit onto every matching placed copy, but that can't retarget one
+# specific placed guard without touching every other creature using the same
+# blueprint. This edits one instance's own struct in place instead.
+
+def render_placed_creatures_form(root, git_root, resrefs):
+    sections = []
+    for res in resrefs:
+        path = git_path(git_root, res)
+        if not os.path.isfile(path):
+            continue
+        g = load_cached(path)
+        rows = []
+        for idx, entry in enumerate(getv(g, "Creature List", [])):
+            name = _obj_name("creature", entry)
+            tag = getv(entry, "Tag", "")
+            blueprint = getv(entry, "TemplateResRef", "")
+            lootable = bool(getv(entry, "Lootable", 1))
+            rows.append(
+                "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                "<td><a href='%s'>Edit</a></td></tr>" %
+                (esc(name), esc(tag), esc(blueprint), "Yes" if lootable else "No",
+                 purl("/areas/creature?area=" + urllib.parse.quote(res)
+                      + "&idx=" + str(idx))))
+        if not rows:
+            continue
+        sections.append(
+            "<h3>%s</h3><table class='remove-objects'>"
+            "<tr>%s%s%s%s<th>Edit</th></tr>%s</table>" %
+            (esc(res), sth("Name"), sth("Tag"), sth("Blueprint"), sth("Lootable"),
+             "".join(rows)))
+
+    if not sections:
+        return page("Edit placed creatures",
+                    "<p class='note'>No creatures found in the selected "
+                    "area(s).</p><p><a href='%s'>Back</a></p>" % purl("/areas"))
+
+    body = ("<p><input type='search' placeholder='Filter by name/tag/blueprint...' "
+            "oninput='qnmFilterObjects(this)' style='width:24em'></p>"
+            "<p class='note'>Click Edit to change one placed creature's own "
+            "settings - this does not touch its blueprint or any other copy "
+            "placed elsewhere.</p>%s"
+            "<p><a href='%s'>Back</a></p>" %
+            ("".join(sections), purl("/areas")))
+    return page("Edit placed creatures", body + SORT_SCRIPT + FILTER_SCRIPT)
+
+
+def render_instance_form(root, ares, idx, entry):
+    action = purl("/areas/creature/apply")
+    ident = ("<input type='hidden' name='area' value='%s'>"
+             "<input type='hidden' name='idx' value='%d'>" % (esc(ares), idx))
+
+    script_rows = "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' value='%s'></td></tr>" %
+        (label, field, esc(getv(entry, field, "")))
+        for field, label in CREATURE_SCRIPT_FIELDS)
+
+    def flag_row(field, label, default):
+        cur = bool(getv(entry, field, default))
+        return ("<tr><td>%s</td><td><select name='%s'>"
+                "<option value='1'%s>Yes</option>"
+                "<option value='0'%s>No</option></select></td></tr>" %
+                (label, field, " selected" if cur else "",
+                 " selected" if not cur else ""))
+    flag_rows = "".join(flag_row(f, l, d) for f, l, d in CREATURE_FLAG_FIELDS)
+
+    name = _obj_name("creature", entry) or getv(entry, "Tag", "") or "(unnamed)"
+    body = (
+        "<p>Editing placed creature <b>%s</b> (tag <code>%s</code>, blueprint "
+        "<code>%s</code>) in area <b>%s</b>.</p>"
+        "<p class='note'>This edits only this one placed instance - the "
+        "blueprint and any other copies elsewhere are untouched.</p>"
+        "<form method='post' action='%s'>%s"
+        "<fieldset><legend>Scripts</legend><table>"
+        "<tr><th>Event</th><th>Script resref</th></tr>%s</table></fieldset>"
+        "<fieldset><legend>Flags</legend><table>"
+        "<tr><th>Flag</th><th>Value</th></tr>%s</table></fieldset>"
+        "<fieldset><legend>Decay time</legend><table>"
+        "<tr><td>Decay time (ms)</td><td><input type='text' name='DecayTime' "
+        "value='%s'></td></tr></table>"
+        "<p class='note'>How long a lootable corpse stays before "
+        "disappearing, in milliseconds.</p></fieldset>"
+        "<fieldset><legend>Equipment &amp; Inventory</legend>%s</fieldset>"
+        "<input type='submit' value='Save'> "
+        "<a class='cancel-link' href='%s'>Cancel</a></form>" %
+        (esc(name), esc(getv(entry, "Tag", "")), esc(getv(entry, "TemplateResRef", "")),
+         esc(ares), action, ident, script_rows, flag_rows,
+         esc(getv(entry, "DecayTime", 5000)), render_equipment(root, entry),
+         purl("/areas/edit?action=edit_creatures&res=" + urllib.parse.quote(ares))))
+    return page("Placed creature: " + name, body)
+
+
+def apply_instance_settings(git_root, ares, idx, form):
+    """Apply settings directly onto one placed creature instance's own
+    struct in area <ares>.git.json. Reuses apply_char_edits for the
+    Lootable/Dropable fields (an instance entry has the exact same shape as
+    a blueprint for those), then applies Scripts/Plot/NoPermDeath/
+    IsImmortal/DecayTime the same way render_instance_form prefills them:
+    directly, since there is exactly one target and its current value is
+    already showing in the form (unlike the bulk blueprint editor, blank
+    isn't "leave unchanged" here - it's "clear this script")."""
+    path = git_path(git_root, ares)
+    g = json_load(path)
+    entries = getv(g, "Creature List", [])
+    if idx >= len(entries):
+        return False
+    entry = entries[idx]
+    touched = apply_char_edits(entry, form)
+
+    for field, _label in CREATURE_SCRIPT_FIELDS:
+        val = form.get(field, [None])[0]
+        if val is None:
+            continue
+        new = val.strip().lower()[:16]
+        if getv(entry, field, "") != new:
+            setv(entry, field, new, "resref")
+            touched = True
+
+    for field, _label, default in CREATURE_FLAG_FIELDS:
+        if field == "Lootable":
+            continue  # already handled by apply_char_edits above
+        val = form.get(field, [None])[0]
+        if val is None:
+            continue
+        new = int(val)
+        if getv(entry, field, default) != new:
+            setv(entry, field, new, "byte")
+            touched = True
+
+    decay = form.get("DecayTime", [None])[0]
+    if decay is not None and decay.strip():
+        new = int(decay.strip())
+        if getv(entry, "DecayTime", 5000) != new:
+            setv(entry, "DecayTime", new, "dword")
+            touched = True
+
+    if touched:
+        json_save(path, g)
+        invalidate(path)
+    return touched
+
+
 # --- Module info (module.ifo.json) ------------------------------------------
 
 def module_ifo_path(root):
@@ -2575,6 +2721,9 @@ class Handler(BaseHTTPRequestHandler):
             if action == "remove_objects":
                 self._send(render_remove_objects_form(root, proj.git_root, resrefs))
                 return
+            if action == "edit_creatures":
+                self._send(render_placed_creatures_form(root, proj.git_root, resrefs))
+                return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
                       "music": render_music_form,
@@ -2597,6 +2746,20 @@ class Handler(BaseHTTPRequestHandler):
             ident = "<input type='hidden' name='res' value='%s'>" % esc(res)
             self._send(page("Creature: " + res,
                             render_char_form(d, purl("/creature/apply"), ident, root)))
+        elif sub == "/areas/creature":
+            ares = query.get("area", [""])[0]
+            idx_s = query.get("idx", [""])[0]
+            gpath = git_path(proj.git_root, ares)
+            entries = getv(load_cached(gpath), "Creature List", []) \
+                if os.path.isfile(gpath) and idx_s.isdigit() else []
+            idx = int(idx_s) if idx_s.isdigit() else -1
+            if not (0 <= idx < len(entries)):
+                self._send(page("Unknown placed creature",
+                                "<p class='err'>No such placed creature.</p>"
+                                "<p><a href='%s'>Areas</a></p>"
+                                % purl("/areas")), 404)
+                return
+            self._send(render_instance_form(root, ares, idx, entries[idx]))
         elif sub == "/module":
             if not os.path.isfile(module_ifo_path(root)):
                 self._send(page("No module.ifo",
@@ -2666,6 +2829,9 @@ class Handler(BaseHTTPRequestHandler):
             if action == "remove_objects":
                 self._send(render_remove_objects_form(root, proj.git_root, resrefs))
                 return
+            if action == "edit_creatures":
+                self._send(render_placed_creatures_form(root, proj.git_root, resrefs))
+                return
             render = {"scripts": render_scripts_form,
                       "lighting": render_lighting_form,
                       "music": render_music_form,
@@ -2706,6 +2872,19 @@ class Handler(BaseHTTPRequestHandler):
                             "<p><a href='%s'>Back</a></p>" %
                             (esc(res), purl("/creature?res="
                                             + urllib.parse.quote(res)))))
+        elif sub == "/areas/creature/apply":
+            ares = form.get("area", [""])[0]
+            idx_s = form.get("idx", [""])[0]
+            if not idx_s.isdigit() or not os.path.isfile(git_path(proj.git_root, ares)):
+                self._send(page("Unknown placed creature",
+                                "<p class='err'>No such placed creature.</p>"
+                                "<p><a href='%s'>Areas</a></p>" % purl("/areas")), 404)
+                return
+            apply_instance_settings(proj.git_root, ares, int(idx_s), form)
+            self._send(page("Saved", "<p class='ok'>Placed creature saved.</p>"
+                            "<p><a href='%s'>Back to placed creatures</a></p>"
+                            % purl("/areas/edit?action=edit_creatures&res="
+                                   + urllib.parse.quote(ares))))
         elif sub == "/creatures/select":
             resrefs = [r for r in form.get("res", [])
                        if os.path.isfile(utc_path(root, r))]
