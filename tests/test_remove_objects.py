@@ -86,14 +86,18 @@ def make_creature(tag, resref, x=0.0, y=0.0, equip=None, carried=None):
     return d
 
 
-def make_item(tag, resref, x=0.0, y=0.0):
-    return {
+def make_item(tag, resref, x=0.0, y=0.0, item_list=None):
+    d = {
         "__struct_id": 0,
         "Tag": _field("cexostring", tag),
         "TemplateResRef": _field("resref", resref),
         "XPosition": _field("float", x),
         "YPosition": _field("float", y),
+        "HasInventory": _field("byte", 1 if item_list else 0),
     }
+    if item_list is not None:
+        d["ItemList"] = _field("list", item_list)
+    return d
 
 
 def make_equipped(slot_id, resref):
@@ -164,6 +168,38 @@ class RemoveObjectsTests(unittest.TestCase):
         self.assertEqual(remaining_gems[0]["InventoryRes"]["value"], "nw_it_gem002")
         self.assertEqual(len(g["Creature List"]["value"][0]["Equip_ItemList"]["value"]), 0)
         self.assertEqual(len(g["Creature List"]["value"][0]["ItemList"]["value"]), 1)
+
+    def test_nested_inventory_removal_on_loose_item_leaves_item_intact(self):
+        self._write_git("area_bag", make_git_json(
+            items=[make_item("bag1", "plc_bagofholding",
+                              item_list=[make_carried("nw_it_gem001"),
+                                         make_carried("nw_it_gem002")])],
+        ))
+        form = {"res": ["area_bag"], "del": ["area_bag|item|0|ItemList|0"]}
+        CONSOLE.apply_remove_objects(self.tmp, self.tmp, form)
+        g = self._load_git("area_bag")
+        # the loose item itself must still exist
+        self.assertEqual(len(g["List"]["value"]), 1)
+        remaining_gems = g["List"]["value"][0]["ItemList"]["value"]
+        self.assertEqual(len(remaining_gems), 1)
+        self.assertEqual(remaining_gems[0]["InventoryRes"]["value"], "nw_it_gem002")
+
+    def test_render_shows_loose_item_nested_inventory_row(self):
+        self._write_git("area_bag2", make_git_json(
+            items=[make_item("bag1", "plc_bagofholding",
+                              item_list=[make_carried("nw_it_gem001")])],
+        ))
+        html = CONSOLE.render_remove_objects_form(self.tmp, self.tmp, ["area_bag2"])
+        self.assertIn("area_bag2|item|0", html)
+        self.assertIn("area_bag2|item|0|ItemList|0", html)
+
+    def test_render_includes_filter_box_and_script(self):
+        self._write_git("area_i", make_git_json(
+            placeables=[make_placeable("t1", "plc_torch")]))
+        html = CONSOLE.render_remove_objects_form(self.tmp, self.tmp, ["area_i"])
+        self.assertIn("qnmFilterObjects", html)
+        self.assertIn("type='search'", html)
+        self.assertIn("table class='remove-objects'", html)
 
     def test_backup_created_once_and_not_clobbered(self):
         path = self._write_git("area_c", make_git_json(

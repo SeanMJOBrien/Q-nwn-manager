@@ -8,8 +8,12 @@ scope" section this shipped against for the full reasoning.
 - Doors/Triggers/Waypoints/Sounds/Stores/Encounters aren't removable yet -
   only Placeable/Creature/loose-item lists are. Higher blast radius (broken
   transitions/script hooks) if done carelessly.
-- No filtering/search box within the remove-objects page itself - a large
-  area (one sample had 86 placeables) renders as one long flat list.
-- A loose ground item's own nested inventory (bag-of-holding-style items
-  that themselves carry an ItemList) isn't exposed for removal - only
-  creature/placeable containers get the inventory drill-down.
+- ~~No filtering/search box within the remove-objects page itself~~ - added
+  a client-side live filter (`qnmFilterObjects`/`FILTER_SCRIPT`) that hides
+  non-matching rows (grouped with their nested inventory rows) without a
+  round trip, so ticked checkboxes survive filtering.
+- ~~A loose ground item's own nested inventory isn't exposed for removal~~ -
+  `INVENTORY_SUBFIELDS["item"]` now drills into a loose item's own `ItemList`
+  the same way placeables' carried items already worked; no other code
+  changes were needed since `apply_remove_objects`'s dispatch was already
+  generic over category.

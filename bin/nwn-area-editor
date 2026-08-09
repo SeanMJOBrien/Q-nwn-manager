@@ -186,8 +186,8 @@ body{font-family:system-ui,sans-serif;margin:1.5em;background:#1e1f24;color:#d8d
 a{color:#7ab3ff} table{border-collapse:collapse;margin:1em 0}
 td,th{border:1px solid #444;padding:.25em .6em;text-align:left}
 th{background:#2a2b31} tr:nth-child(even){background:#25262c}
-input[type=text],input[type=number],input[type=file],select{background:#2a2b31;
- color:#d8d9de;border:1px solid #555;padding:.2em .4em}
+input[type=text],input[type=number],input[type=file],input[type=search],select{
+ background:#2a2b31;color:#d8d9de;border:1px solid #555;padding:.2em .4em}
 input[type=submit],button{background:#39507a;color:#fff;border:0;
  padding:.4em 1em;cursor:pointer;margin:.2em}
 .nav a{margin-right:1.2em} .note{color:#9a9;font-style:italic}
@@ -975,11 +975,13 @@ OBJECT_LIST_FIELDS = {
     "item": "List",
 }
 
-# Nested inventory fields per top-level category. Loose items have no
-# inventory of their own here, so "item" is intentionally absent.
+# Nested inventory fields per top-level category. A loose ground item can
+# carry its own ItemList too (bag-of-holding-style items) - same field/shape
+# as a placeable's carried list, just one level further from the area root.
 INVENTORY_SUBFIELDS = {
     "creature": [("Equip_ItemList", "Equipped"), ("ItemList", "Carried")],
     "placeable": [("ItemList", "Carried")],
+    "item": [("ItemList", "Carried")],
 }
 
 
@@ -1024,6 +1026,36 @@ def _inventory_rows_html(res, category, idx, entry):
             "<table class='nested'>%s</table></td></tr>" % "".join(rows))
 
 
+# Live client-side filter box for the Remove objects page. Same row-grouping
+# rule as SORT_SCRIPT (a qnm-detail row travels with its preceding parent row)
+# so filtering a container also hides/shows its nested inventory rows as one
+# unit, and a match inside a nested row (e.g. a carried item's name) keeps the
+# parent visible too. Pure client-side, like SORT_SCRIPT, so it doesn't
+# disturb in-progress checkbox selections.
+FILTER_SCRIPT = """
+<script>
+function qnmFilterObjects(input){
+  var q = input.value.toLowerCase();
+  document.querySelectorAll('table.remove-objects').forEach(function(table){
+    var groups = [];
+    Array.prototype.slice.call(table.rows, 1).forEach(function(r){
+      if (r.classList.contains('qnm-detail') && groups.length) {
+        groups[groups.length - 1].push(r);
+      } else {
+        groups.push([r]);
+      }
+    });
+    groups.forEach(function(g){
+      var text = g.map(function(r){ return r.textContent; }).join(' ').toLowerCase();
+      var hit = !q || text.indexOf(q) !== -1;
+      g.forEach(function(r){ r.style.display = hit ? '' : 'none'; });
+    });
+  });
+}
+</script>
+"""
+
+
 def render_remove_objects_form(root, git_root, resrefs):
     sections = []
     for res in resrefs:
@@ -1052,7 +1084,7 @@ def render_remove_objects_form(root, git_root, resrefs):
         if not area_rows:
             continue
         sections.append(
-            "<h3>%s</h3><table><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
+            "<h3>%s</h3><table class='remove-objects'><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
             (esc(res), sth("Type"), sth("Name"), sth("Tag"), sth("Blueprint"),
              sth("Position"), "".join(area_rows)))
 
@@ -1062,7 +1094,9 @@ def render_remove_objects_form(root, git_root, resrefs):
                     "items found in the selected area(s).</p>"
                     "<p><a href='%s'>Back</a></p>" % purl("/areas"))
 
-    body = ("<form method='post' action='%s'>%s%s"
+    body = ("<p><input type='search' placeholder='Filter by name/tag/blueprint...' "
+            "oninput='qnmFilterObjects(this)' style='width:24em'></p>"
+            "<form method='post' action='%s'>%s%s"
             "<p class='note'>Tick objects to REMOVE, then Apply. First edit "
             "of each area keeps a one-time .git.json.bak backup, but this is "
             "otherwise permanent - review before applying.</p>"
@@ -1070,7 +1104,7 @@ def render_remove_objects_form(root, git_root, resrefs):
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
              "".join(sections), purl("/areas")))
-    return page("Remove placed objects", body + SORT_SCRIPT)
+    return page("Remove placed objects", body + SORT_SCRIPT + FILTER_SCRIPT)
 
 
 def apply_remove_objects(root, git_root, form):
