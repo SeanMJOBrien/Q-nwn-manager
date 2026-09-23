@@ -585,6 +585,9 @@ MUSIC_FIELDS = [
     ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
     ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
 ]
+# Fields whose value is an ambientmusic.2da row index - rendered as a
+# titled dropdown (via music_options()) instead of a bare number input.
+MUSIC_TRACK_FIELDS = {"MusicDay", "MusicNight", "MusicBattle"}
 # Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
 # sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
 AREA_FLAG_INTERIOR = 1
@@ -863,24 +866,44 @@ def apply_lighting(root, form):
 def render_music_form(root, resrefs):
     # Prefill from the first selected area so single-area edits show state.
     d0 = load_cached(are_path(root, resrefs[0]))
+    opts = music_options()
+    titles = dict(opts)
+
+    def current_display(f):
+        v = getv(d0, f, "")
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (esc(titles[v]), v)
+        return esc(v)
+
+    def field_input(f):
+        if f in MUSIC_TRACK_FIELDS and opts:
+            options = ("<option value=''>(leave unchanged)</option>" +
+                       "".join("<option value='%d'>%d - %s</option>" %
+                               (i, i, esc(t)) for i, t in opts))
+            return "<select name='%s'>%s</select>" % (f, options)
+        return "<input type='text' name='%s' placeholder='(leave unchanged)'>" % f
+
     rows = "".join(
-        "<tr><td>%s</td>"
-        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
-        "<td>%s</td><td class='note'>%s</td></tr>" %
-        (f, f, esc(getv(d0, f, "")), hint)
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td class='note'>%s</td></tr>" %
+        (f, field_input(f), current_display(f), hint)
         for f, _t, hint in MUSIC_FIELDS)
+    note = ("<p class='note'>Blank fields are left unchanged on every area."
+            + (" Day/Night/Battle titles come from ambientmusic.2da / "
+               "dialog.tlk, same as the toolset's music picker."
+               if opts else
+               " Day/Night/Battle values are row indices into "
+               "ambientmusic.2da (look them up with the toolset's music "
+               "picker or nwn-mcp's resolve_2da/search_2da tools) - not "
+               "resrefs. Run bin/wiki_data/_build_stock.py to enable "
+               "titled dropdowns here.") + "</p>")
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
             "<form method='post' action='%s'>%s"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
-            "<th>Hint</th></tr>%s</table>"
-            "<p class='note'>Blank fields are left unchanged on every area. "
-            "Day/Night/Battle values are row indices into ambientmusic.2da "
-            "(look them up with the toolset's music picker or nwn-mcp's "
-            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
-             hidden_resrefs(resrefs), esc(resrefs[0]), rows, purl("/areas")))
+             hidden_resrefs(resrefs), esc(resrefs[0]), rows, note, purl("/areas")))
     return page("Bulk edit area music", body)
 
 
@@ -1790,6 +1813,14 @@ def feat_name(feat_id):
 
 def skill_name(skill_id):
     return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
+
+
+def music_options():
+    """ambientmusic.2da rows as (id, title) pairs, sorted by id - what the
+    toolset's Music Day/Night/Battle picker shows in place of the raw
+    resref/row number."""
+    data = _load_stock_json("music")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
 
 
 def utc_path(root, res):
@@ -3342,7 +3373,12 @@ def main():
     if not SINGLE_MODE:
         print("  ingest start page: %s/start   (drop folder: %s)"
               % (base, LANDING_DIR), flush=True)
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.", flush=True)
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":
