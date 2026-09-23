@@ -6,12 +6,12 @@ or to bootstrap a fresh checkout from authoritative sources.
 
 Reads via `nwn_resman_extract`:
   - baseitems.2da, racialtypes.2da, classes.2da, iprp_feats.2da,
-    appearance.2da
+    appearance.2da, ambientmusic.2da
   - lang/en/data/dialog.tlk (TLK ref → pretty name)
 
 Writes:
   - baseitems.json, racialtypes.json, classes.json, iprp_feats.json,
-    appearance.json
+    appearance.json, music.json
 
 Usage:
   ./_build_stock.py [--nwn DIR]
@@ -69,11 +69,15 @@ WEAPON_COLS = [
 ]
 
 
-def extract_stock_2da(nwn_root: Path, name: str, dest: Path) -> Path:
+def extract_stock_2da(nwn_root: Path, name: str, dest: Path,
+                      user_dir: Path | None = None) -> Path:
     """Pull a stock 2DA out of the NWN install via nwn_resman_extract."""
+    cmd = ["nwn_resman_extract", "--root", str(nwn_root)]
+    if user_dir is not None:
+        cmd += ["--userdirectory", str(user_dir)]
+    cmd.append(name)
     subprocess.run(
-        ["nwn_resman_extract", "--root", str(nwn_root), name],
-        cwd=dest, check=True,
+        cmd, cwd=dest, check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     p = dest / name
@@ -82,7 +86,7 @@ def extract_stock_2da(nwn_root: Path, name: str, dest: Path) -> Path:
     return p
 
 
-def build(nwn_dir: Path, out_dir: Path) -> None:
+def build(nwn_dir: Path, out_dir: Path, user_dir: Path | None = None) -> None:
     require_tools()
     if shutil.which("nwn_resman_extract") is None:
         sys.exit("error: nwn_resman_extract must be on PATH "
@@ -101,7 +105,7 @@ def build(nwn_dir: Path, out_dir: Path) -> None:
         for twoda_name, out_name, name_col, label_col in TARGETS:
             print(f"  · stock → {twoda_name}")
             try:
-                twoda = extract_stock_2da(nwn_dir, twoda_name, tmp)
+                twoda = extract_stock_2da(nwn_dir, twoda_name, tmp, user_dir)
             except Exception as e:
                 print(f"    warn: could not extract {twoda_name}: {e}",
                       file=sys.stderr)
@@ -141,7 +145,7 @@ def build(nwn_dir: Path, out_dir: Path) -> None:
         # the numeric fields the wiki needs for the creature attack
         # schedule. Keyed by row id, so it sits alongside `baseitems.json`.
         try:
-            twoda = extract_stock_2da(nwn_dir, "baseitems.2da", tmp)
+            twoda = extract_stock_2da(nwn_dir, "baseitems.2da", tmp, user_dir)
         except Exception as e:
             print(f"    warn: weapon stats: could not re-extract baseitems.2da: {e}",
                   file=sys.stderr)
@@ -178,7 +182,7 @@ def build(nwn_dir: Path, out_dir: Path) -> None:
         # stored Str/Dex/... at runtime (e.g. Elf +2 Dex / -2 Con), so the wiki
         # must too. Keyed by race id; non-zero adjustments only.
         try:
-            twoda = extract_stock_2da(nwn_dir, "racialtypes.2da", tmp)
+            twoda = extract_stock_2da(nwn_dir, "racialtypes.2da", tmp, user_dir)
         except Exception as e:
             print(f"    warn: race adjust: could not re-extract racialtypes.2da: {e}",
                   file=sys.stderr)
@@ -218,6 +222,48 @@ def build(nwn_dir: Path, out_dir: Path) -> None:
             )
             print(f"    wrote {apath.name}: {len(adjusts)} rows")
 
+        # Area music track names, as shown in the toolset's Music
+        # Day/Night/Battle pickers. ambientmusic.2da doesn't fit the generic
+        # TARGETS loop above: base-game rows resolve a "Description" TLK
+        # strref same as everywhere else, but expansion-pack tracks (SoA/
+        # HotU/Daggerford stingers) carry no strref at all and instead give
+        # a literal string in "DisplayName" - resolve_name()'s Label
+        # fallback would otherwise just title-case the mus_* resref.
+        try:
+            twoda = extract_stock_2da(nwn_dir, "ambientmusic.2da", tmp, user_dir)
+        except Exception as e:
+            print(f"    warn: music: could not extract ambientmusic.2da: {e}",
+                  file=sys.stderr)
+        else:
+            headers, rows = parse_2da(twoda)
+            d_idx = col_index(headers, "Description")
+            r_idx = col_index(headers, "Resource")
+            dn_idx = col_index(headers, "DisplayName")
+            music: dict[str, str] = {}
+            for row in rows:
+                if not row:
+                    continue
+                try:
+                    ridx = int(row[0])
+                except ValueError:
+                    continue
+                desc_cell = row[d_idx] if (d_idx is not None and d_idx < len(row)) else ""
+                res_cell = row[r_idx] if (r_idx is not None and r_idx < len(row)) else ""
+                dn_cell = row[dn_idx] if (dn_idx is not None and dn_idx < len(row)) else ""
+                pretty = resolve_name(desc_cell, res_cell, dialog_strings, {})
+                if not desc_cell and dn_cell:
+                    pretty = dn_cell
+                if pretty:
+                    music[str(ridx)] = pretty
+            mpath = out_dir / "music.json"
+            mpath.write_text(
+                json.dumps({"_source": "stock NWN :: ambientmusic.2da",
+                            **music},
+                           indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            print(f"    wrote {mpath.name}: {len(music)} rows")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -227,10 +273,14 @@ def main() -> None:
                     default=home / ".local" / "share" / "Steam" / "steamapps"
                     / "common" / "Neverwinter Nights",
                     help="NWN install root (containing lang/en/data/dialog.tlk)")
+    ap.add_argument("--userdirectory", type=Path, default=None,
+                    help="NWN user directory, if nwn_resman_extract can't "
+                         "find one on its own (needed when --nwn points at "
+                         "a bare data dir with no databuild.txt)")
     args = ap.parse_args()
 
     out_dir = Path(__file__).resolve().parent
-    build(args.nwn, out_dir)
+    build(args.nwn, out_dir, args.userdirectory)
     print("done.")
 
 
