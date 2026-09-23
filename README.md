@@ -59,8 +59,69 @@ A Nim toolchain plus two Nim packages must be on `PATH`:
 
 - `nim`, `nimble`
 - `nasher`
-- `nwn_gff`, `nwn_script_comp` (from the `neverwinter` package)
-- `python3` (for `nwn-manager wiki`)
+- `nwn_gff`, `nwn_erf` (from the `neverwinter` package) and `nwnsc` (a
+  separate, standalone script compiler)
+- `python3` (for `nwn-manager wiki` and `nwn-manager console`) - **optional**
+  when a compiled `nwn-pytools` binary is present, see below
+
+> **Bundled tools — no install needed.** This repo ships the **full**
+> `nwn-tools/` directory (all three platforms: `linux`, `macos_arm64`, `win`)
+> and `nwn-manager` adds the right platform's binaries to `PATH`
+> automatically, so a fresh clone can ingest/build/wiki with no `nimble
+> install`. Resolution order: `$NWN_TOOLS_DIR` → the in-repo `nwn-tools/` → a
+> shared `nwn-tools/` sibling of the repo → `~/.nimble/bin`.
+>
+> **Building (`repack`) always uses the bundled `nwnsc`, on all three
+> platforms** — `nwn-manager` no longer uses `nwn_script_comp` at all (it's a
+> niv/neverwinter.nim tool that upstream has never shipped for macOS or
+> Windows, and its CLI isn't compatible with `nwnsc` anyway). `nwn_script_comp`
+> stays bundled on Linux only, for manual/legacy use via
+> `bin/nwn_script_comp_wrapper` — nothing in `nwn-manager` invokes it
+> automatically anymore. Ingesting (`init`/`unpack`) only needs `nasher` +
+> `nwn_gff`.
+>
+> **`nwn-tools/base-scripts/`** (~20MB, vendored alongside the per-platform
+> dirs) is a pre-extracted copy of the base game's `nwscript.nss` and all
+> base/SoU/HotU includes. `nwnsc` (unlike the old `nwn_script_comp`) can't pull
+> these from a live NWN install on a server box with no game client present,
+> so `repack` passes this directory via `-i` instead. Override with
+> `$NWN_BASE_SCRIPTS_DIR` if you need a patched/updated set; regenerate it (on
+> Linux, the only platform with `nwn_resman_extract` bundled) with
+> `nwn_resman_extract --all -p .nss --root <NWN_INSTALL> --userdirectory
+> <NWN_USERDIR> -d nwn-tools/base-scripts` against a real, fully-installed
+> client.
+>
+> **`nasher` is pinned at the currently-vendored 0.19.0/0.20.0**, not the
+> upstream 1.1.2 release — nasher's own vendoring notes flag the 1.x line as a
+> breaking CLI/config change; bumping it needs a dedicated test pass across
+> every project depending on the flags `nwn-manager` passes to `nasher pack`.
+>
+> On macOS, binaries from a `git clone` are **not** Gatekeeper-quarantined, so
+> they run from the terminal without prompts.
+
+### Native binaries (no Python required)
+
+`nwn-manager wiki`/`console`/`edit-areas`/`serve`, plus the `repack` dialog-
+integrity gate and the `init`/`repack` hak/TLK lookups, all run `python3`
+under the hood by default. If a compiled `nwn-pytools`/`nwn-pytools.exe`
+binary is present at `nwn-tools/<platform>/nwn-pytools/` (same per-platform
+layout and discovery order as `nasher`/`nwn_gff`/`nwnsc` above), both
+`bin/nwn-manager` and `bin/nwn-manager.ps1` use it instead - `python3` is
+never invoked, and the `-h` preflight check for it is skipped. Falls back to
+today's `python3 <script>` behavior automatically when no compiled binary is
+found, so this is a pure add-on: nothing changes if you don't have one.
+
+Built from `bin/_pytools_main.py` (a small dispatcher wrapping
+`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`) via
+`build/nwn-pytools.spec` (PyInstaller `--onedir`). See
+`.github/workflows/build-pytools.yml` for the per-platform build; run it
+manually from the Actions tab, or build locally:
+
+```sh
+pip install pyinstaller
+pyinstaller build/nwn-pytools.spec
+cp -a dist/nwn-pytools nwn-tools/<platform>/nwn-pytools
+```
 
 ### Install on an immutable Fedora distro (Bazzite, Silverblue, etc.)
 
@@ -273,6 +334,74 @@ DelayCommand(5.0, ExecuteScript("nwnmgr_bstamp", oPC));
 
 `OBJECT_SELF` inside the stamp is the object you pass to `ExecuteScript`, so pass
 the entering player (`GetEnteringObject()` / the PC) and they receive the message.
+
+### Web console (all-in-one UI)
+
+```sh
+nwn-manager console                         # → http://127.0.0.1:8341/
+nwn-manager console --projects-dir ~/mods   # manage projects under a chosen dir
+nwn-manager console --port 8080 --url-prefix /qedit   # behind a reverse proxy
+```
+
+A local, stdlib-only web console that ties the whole lifecycle together and
+manages **multiple projects** at once. Each project lives in its own
+subdirectory under `--projects-dir` (default: `<repo>/projects`). From the
+home page you can:
+
+- **Upload a `.mod`** (plus optional loose files) — it is ingested into a new
+  project via `nwn-manager init` (unpacked into `unpacked/`). Extra files are
+  dropped into `unpacked/`. The upload is kept under `.uploads/` so
+  *Re-ingest from source* (`nwn-manager unpack`) keeps working.
+- **Rebuild the wiki** per project (`nwn-manager wiki`) and view it in place at
+  `/p/<slug>/wiki/` — no external web server needed.
+- **Build & download** the packed `.mod` (`nwn-manager repack`), then download
+  it from `/p/<slug>/download`.
+- **Bulk-edit areas** (event scripts, lighting/fog, ambient music, tags/resrefs),
+  **creatures** (abilities, stats, feats, appearance) and **module info** — all
+  JSON-native, editing `unpacked/*.are.json` / `*.utc.json` / `module.ifo.json`
+  directly (every first edit writes a one-time `.bak` sibling).
+- **Area Map** (`/p/<slug>/areas/map`) — an interactive, pan/zoomable map of
+  the project's areas laid out by their door/trigger/waypoint transitions;
+  click a node to jump straight into that area's edit forms. (Distinct from
+  the wiki's own read-only "Map" page, which shows the same kind of layout
+  but for the published wiki, not live editing.)
+
+Long operations (build ~minutes, wiki ~30s, ingest) run as background jobs with
+a live-progress page (`/jobs/<id>`). Binds `127.0.0.1` only; put it behind a
+reverse proxy (with `--url-prefix`) if you need to expose it.
+
+#### `start.html` — a simpler ingest entry point
+
+Alongside the full dashboard, there's a standalone ingestion page,
+**`start.html`** at the repo root. Hand it to someone who only needs to
+*ingest a module*, without the rest of the console. It's a **self-contained
+static page** — open the file directly in a browser, or reach the same page
+served at **`/start`** (printed on launch). Two ways to ingest:
+
+- **Upload** a `.mod`/`.erf` via the browser file picker.
+- **Drop a `.mod`/`.erf` into the repo root** (the drop folder; override with
+  `--landing-dir`) — the page lists it with an **Ingest** button.
+
+Both need the console running (default `http://127.0.0.1:8341`). Since a browser
+page can't launch a process, `start.html` shows a **"Start the console"** step at
+the top — the command (`bin/nwn-manager console`) and, when opened as a file, the
+folder to run it from — until it detects the console is up. Once reachable it
+shows a **Stop console** button instead (also in the nav on every console page;
+`POST /shutdown`). The upload form posts to the console, and the drop-folder list
+is fetched from the console's `GET /api/root-mods` (served CORS-open so the page
+works even from `file://`). When you open the file directly and your console is on a
+non-default address, edit the one `CONSOLE_URL` line near the bottom of
+`start.html`; when the page is served at `/start` that value is ignored and
+same-origin URLs are used, so ports and `--url-prefix` just work. `start.html`
+is a normal HTML file you can restyle/reword freely; if it's missing, a
+built-in fallback is served. The dashboard and all other console routes are
+unchanged.
+
+> The older `nwn-manager edit-areas` (single-project areas-only editor,
+> `nwn-area-editor --dir`) still works unchanged for scripted/one-off use and
+> reverse-proxied per-project deployments. For editing player `.bic` character
+> files (binary GFF, outside a project's `unpacked/`), use the standalone
+> `skills/nwn-web-editor/scripts/nwn_web_editor.py`.
 
 ### Generate the wiki
 

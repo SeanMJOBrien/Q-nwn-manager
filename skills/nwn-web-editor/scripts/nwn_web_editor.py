@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import copy
 import fnmatch
 import html
 import json
@@ -153,6 +154,53 @@ def hex_to_dword(s):
     return r | (g << 8) | (b << 16)
 
 
+# --- Stock 2DA name lookups -------------------------------------------------
+# ID -> name tables generated from stock NWN 2DAs by wiki_data/_build_stock.py.
+# This script normally sits in a Q-nwn-manager checkout (skills/nwn-web-editor/
+# scripts/), so bin/wiki_data is three levels up; --data-dir overrides that when
+# it's been copied somewhere else. Every lookup falls back to the raw ID, so a
+# missing directory only costs readability - same contract bin/nwn-area-editor
+# documents for haks that add rows the stock tables don't have.
+
+STOCK_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))), "bin", "wiki_data")
+_STOCK_JSON_CACHE = {}
+
+
+def _load_stock_json(name):
+    if name not in _STOCK_JSON_CACHE:
+        try:
+            with open(os.path.join(STOCK_DATA_DIR, name + ".json"),
+                      encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        data.pop("_source", None)
+        _STOCK_JSON_CACHE[name] = data
+    return _STOCK_JSON_CACHE[name]
+
+
+def class_name(class_id):
+    return _load_stock_json("classes").get(str(class_id), str(class_id))
+
+
+def feat_name(feat_id):
+    return _load_stock_json("feat").get(str(feat_id), str(feat_id))
+
+
+def skill_name(skill_id):
+    return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
+
+
+def music_options():
+    """ambientmusic.2da rows as (id, title) pairs, sorted by id - what the
+    toolset's Music Day/Night/Battle picker shows in place of the raw
+    resref/row number."""
+    data = _load_stock_json("music")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
 # --- HTML helpers -----------------------------------------------------------
 
 def esc(s):
@@ -242,6 +290,9 @@ MUSIC_FIELDS = [
     ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
     ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
 ]
+# Fields whose value is an ambientmusic.2da row index - rendered as a
+# titled dropdown (via music_options()) instead of a bare number input.
+MUSIC_TRACK_FIELDS = {"MusicDay", "MusicNight", "MusicBattle"}
 # Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
 # sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
 AREA_FLAG_INTERIOR = 1
@@ -438,23 +489,43 @@ def apply_lighting(root, form):
 def render_music_form(root, resrefs):
     # Prefill from the first selected area so single-area edits show state.
     d0 = load_cached(os.path.join(root, resrefs[0] + ".are"))
+    opts = music_options()
+    titles = dict(opts)
+
+    def current_display(f):
+        v = getv(d0, f, "")
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (esc(titles[v]), v)
+        return esc(v)
+
+    def field_input(f):
+        if f in MUSIC_TRACK_FIELDS and opts:
+            options = ("<option value=''>(leave unchanged)</option>" +
+                       "".join("<option value='%d'>%d - %s</option>" %
+                               (i, i, esc(t)) for i, t in opts))
+            return "<select name='%s'>%s</select>" % (f, options)
+        return "<input type='text' name='%s' placeholder='(leave unchanged)'>" % f
+
     rows = "".join(
-        "<tr><td>%s</td>"
-        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
-        "<td>%s</td><td class='note'>%s</td></tr>" %
-        (f, f, esc(getv(d0, f, "")), hint)
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td class='note'>%s</td></tr>" %
+        (f, field_input(f), current_display(f), hint)
         for f, _t, hint in MUSIC_FIELDS)
+    note = ("<p class='note'>Blank fields are left unchanged on every area."
+            + (" Day/Night/Battle titles come from ambientmusic.2da / "
+               "dialog.tlk, same as the toolset's music picker."
+               if opts else
+               " Day/Night/Battle values are row indices into "
+               "ambientmusic.2da (look them up with the toolset's music "
+               "picker or nwn-mcp's resolve_2da/search_2da tools) - not "
+               "resrefs. Run bin/wiki_data/_build_stock.py to enable "
+               "titled dropdowns here.") + "</p>")
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
             "<form method='post' action='/areas/music/apply'>%s"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
-            "<th>Hint</th></tr>%s</table>"
-            "<p class='note'>Blank fields are left unchanged on every area. "
-            "Day/Night/Battle values are row indices into ambientmusic.2da "
-            "(look them up with the toolset's music picker or nwn-mcp's "
-            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'></form>" %
             (len(resrefs), esc(", ".join(resrefs)), hidden_resrefs(resrefs),
-             esc(resrefs[0]), rows))
+             esc(resrefs[0]), rows, note))
     return page("Bulk edit area music", body)
 
 
@@ -559,6 +630,188 @@ APPEAR_FIELDS = [  # only rendered when present in the file (dynamic models)
     ("Tail_New", "dword"), ("Wings_New", "dword"),
 ]
 BIC_EXTRA_FIELDS = [("Experience", "dword"), ("Gold", "dword"), ("Age", "int")]
+# Alignment axes, both 0-100 bytes. Only rendered when present in the file.
+ALIGN_FIELDS = [("GoodEvil", "byte", "0 = evil .. 100 = good"),
+                ("LawfulChaotic", "byte", "0 = chaotic .. 100 = lawful")]
+# Free-text character fields. SubRace is absent on plenty of characters, so
+# it's only offered when the file already carries it.
+BIC_TEXT_FIELDS = [("Deity", "cexostring"), ("SubRace", "cexostring")]
+# An unused quickbar slot, copied from the shape real .bic files use. Clearing
+# the quickbar overwrites every slot with this and keeps the list length.
+EMPTY_QB_SLOT = {"__struct_id": 0,
+                 "QBObjectType": {"type": "byte", "value": 0}}
+
+
+def render_skills_html(d):
+    """Skill-rank inputs. SkillList is POSITIONAL - entry N is row N of
+    skills.2da and carries nothing but its Rank, so the index *is* the skill
+    identity. Render in file order and never sort: reordering the list would
+    silently reassign every skill on the character."""
+    entries = getv(d, "SkillList", [])
+    if not entries:
+        return ("<p class='note'>No SkillList on this file - nothing to edit. "
+                "Creating one would mean guessing the module's full skills.2da "
+                "row order, so it's left alone.</p>")
+    rows = "".join(
+        "<tr><td>%s</td><td><input type='text' name='skill_%d' value='%s' "
+        "size='4'></td></tr>" %
+        (esc(skill_name(idx)), idx, esc(getv(entry, "Rank", 0)))
+        for idx, entry in enumerate(entries))
+    return ("<table>%s</table>"
+            "<p class='note'>Ranks only - the game adds ability, item and feat "
+            "modifiers on top. Blank leaves a rank unchanged. Rows are in "
+            "skills.2da order; a row labelled 'skill N' isn't in the bundled "
+            "stock table (a hak added it).</p>" % rows)
+
+
+def render_classes_html(d):
+    """Class/level inputs. Edited in place by index - the entry also carries
+    KnownList0-9 (prepared/known spells) and School, which are left untouched."""
+    entries = getv(d, "ClassList", [])
+    if not entries:
+        return "<p class='note'>No ClassList on this file.</p>"
+    rows = "".join(
+        "<tr><td><input type='text' name='class_%d_id' value='%s' size='4'> %s"
+        "</td><td><input type='text' name='class_%d_level' value='%s' "
+        "size='4'></td></tr>" %
+        (idx, esc(getv(entry, "Class", "")),
+         esc(class_name(getv(entry, "Class", ""))),
+         idx, esc(getv(entry, "ClassLevel", "")))
+        for idx, entry in enumerate(entries))
+    return ("<table><tr><th>Class (classes.2da row)</th><th>Level</th></tr>"
+            "%s</table>"
+            "<p class='note'>Changing a level here does NOT rewrite the "
+            "level-up history below, so the two will disagree until you fix "
+            "the character in-game - the integrity check reports exactly "
+            "that. Blank leaves a value unchanged.</p>" % rows)
+
+
+def render_inventory_html(d):
+    """Carried items, tick to remove. Equipped items (Equip_ItemList) are left
+    alone - unequipping via file surgery leaves the character's slots in a
+    state the client handles badly."""
+    entries = getv(d, "ItemList", [])
+    if not entries:
+        return "<p class='note'>Nothing carried.</p>"
+    rows = "".join(
+        "<tr><td><input type='checkbox' name='delitem' value='%d'></td>"
+        "<td>%s</td><td>%s</td></tr>" %
+        (idx, esc(loc_get(entry, "LocalizedName") or "(no name)"),
+         esc(getv(entry, "BaseItem", "")))
+        for idx, entry in enumerate(entries))
+    return ("<table><tr><th>Remove</th><th>Name</th><th>BaseItem</th></tr>"
+            "%s</table>" % rows)
+
+
+def render_levels_html(d):
+    """Read-only view of LvlStatList - the engine's record of how the character
+    was built, one struct per level. Never edited here: an inconsistent history
+    produces a character the client can refuse to load, and the integrity check
+    below is the safe way to surface problems instead."""
+    levels = getv(d, "LvlStatList", [])
+    if not levels:
+        return "<p class='note'>No LvlStatList on this file.</p>"
+    rows = []
+    for num, lv in enumerate(levels, start=1):
+        feats = [getv(f, "Feat") for f in getv(lv, "FeatList", [])]
+        gains = ", ".join(
+            "%s +%s" % (skill_name(idx), getv(s, "Rank", 0))
+            for idx, s in enumerate(getv(lv, "SkillList", []))
+            if getv(s, "Rank", 0))
+        rows.append(
+            "<tr><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td></tr>" %
+            (num, esc(class_name(getv(lv, "LvlStatClass", ""))),
+             esc(getv(lv, "LvlStatHitDie", "")),
+             esc(getv(lv, "SkillPoints", "")),
+             esc(getv(lv, "EpicLevel", "")),
+             esc(gains or "-"),
+             esc(", ".join(feat_name(n) for n in feats) or "-")))
+    return ("<table><tr><th>Level</th><th>Class</th><th>Hit die</th>"
+            "<th>SkillPoints</th><th>Epic</th><th>Skill ranks gained</th>"
+            "<th>Feats gained</th></tr>%s</table>"
+            "<p class='note'>Read-only. This is the level-up audit trail the "
+            "engine validates a character against.</p>" % "".join(rows))
+
+
+def check_bic_integrity(d):
+    """Cross-check the level-up audit trail against the character's current
+    totals. Returns a list of human-readable findings ([] means consistent).
+
+    Never modifies d. Rewriting LvlStatList to match an edit is exactly how you
+    produce a character the client refuses to load, so problems are reported
+    and left for the user to fix in-game."""
+    findings = []
+    levels = getv(d, "LvlStatList", [])
+    classes = getv(d, "ClassList", [])
+    if not levels or not classes:
+        return findings
+
+    def num(o, name):
+        try:
+            return int(getv(o, name, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    total = sum(num(c, "ClassLevel") for c in classes)
+    if len(levels) != total:
+        findings.append(
+            "LvlStatList records %d level-up(s) but ClassList totals %d level(s)."
+            % (len(levels), total))
+
+    tally = {}
+    for lv in levels:
+        cid = getv(lv, "LvlStatClass")
+        tally[cid] = tally.get(cid, 0) + 1
+    for entry in classes:
+        cid = getv(entry, "Class")
+        want, got = num(entry, "ClassLevel"), tally.get(cid, 0)
+        if want != got:
+            findings.append(
+                "%s: ClassList says level %d, LvlStatList records %d level-up(s)."
+                % (class_name(cid), want, got))
+    known = {getv(c, "Class") for c in classes}
+    for cid, got in tally.items():
+        if cid not in known:
+            findings.append(
+                "%s: %d level-up(s) in LvlStatList, but the class isn't in "
+                "ClassList at all." % (class_name(cid), got))
+
+    for idx, entry in enumerate(getv(d, "SkillList", [])):
+        gained = sum(num(sub[idx], "Rank")
+                     for sub in (getv(lv, "SkillList", []) for lv in levels)
+                     if idx < len(sub))
+        have = num(entry, "Rank")
+        if have != gained:
+            findings.append(
+                "%s: %d rank(s) on the character, %d gained across levels."
+                % (skill_name(idx), have, gained))
+
+    granted = set()
+    for lv in levels:
+        granted.update(getv(f, "Feat") for f in getv(lv, "FeatList", []))
+    have = {getv(f, "Feat") for f in getv(d, "FeatList", [])}
+    for n in sorted(have - granted, key=lambda v: (v is None, v)):
+        findings.append("Feat %s (%s) is on the character but was never "
+                        "granted at any level." % (n, feat_name(n)))
+    for n in sorted(granted - have, key=lambda v: (v is None, v)):
+        findings.append("Feat %s (%s) was granted at level-up but is missing "
+                        "from the character." % (n, feat_name(n)))
+    return findings
+
+
+def render_integrity_html(d):
+    findings = check_bic_integrity(d)
+    if not findings:
+        return ("<p class='ok'>Level history is consistent with the "
+                "character's classes, skills and feats.</p>")
+    return ("<p class='warn'>%d inconsistency(s) between the character and its "
+            "level-up history:</p><ul>%s</ul>"
+            "<p class='note'>Nothing here is auto-corrected. A character can "
+            "still load with these, but the client validates the history on "
+            "level-up and may reject it.</p>" %
+            (len(findings),
+             "".join("<li>%s</li>" % esc(f) for f in findings)))
 
 
 def creature_summary(d):
@@ -609,11 +862,47 @@ def render_char_form(d, action, ident_html, is_bic):
         stats += "".join(num_input(f) for f, _t in BIC_EXTRA_FIELDS if f in d)
     appear = "".join(num_input(f) for f, _t in APPEAR_FIELDS if f in d)
 
+    align = "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' value='%s' size='4'>"
+        "</td><td class='note'>%s</td></tr>" % (f, f, esc(getv(d, f, "")), hint)
+        for f, _t, hint in ALIGN_FIELDS if f in d)
+    text_rows = "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' value='%s'></td></tr>"
+        % (f, f, esc(getv(d, f, "")))
+        for f, _t in BIC_TEXT_FIELDS if f in d)
+    if "Description" in d:
+        text_rows += ("<tr><td>Description</td><td><textarea name='Description'"
+                      " rows='6' cols='60'>%s</textarea></td></tr>"
+                      % esc(loc_get(d, "Description")))
+
     feats = sorted(getv(f, "Feat", -1) for f in getv(d, "FeatList", []))
     feat_boxes = "".join(
         "<label style='display:inline-block;margin:.15em .5em'>"
-        "<input type='checkbox' name='delfeat' value='%d'> %d</label>" % (n, n)
+        "<input type='checkbox' name='delfeat' value='%d'> %d %s</label>" %
+        (n, n, esc(feat_name(n)))
         for n in feats)
+
+    # Everything below the shared creature fields is .bic-only: a .utc
+    # blueprint has no level-up history, quickbar or carried player inventory.
+    bic_html = ""
+    if is_bic:
+        bic_html = (
+            "<fieldset><legend>Character</legend><table>%s%s</table></fieldset>"
+            "<fieldset><legend>Classes</legend>%s</fieldset>"
+            "<fieldset><legend>Carried items - tick to REMOVE</legend>%s"
+            "<p class='note'>Equipped items aren't listed; unequipping by file "
+            "surgery leaves the character's slots in a state the client "
+            "handles badly.</p></fieldset>"
+            "<fieldset><legend>Quickbar</legend>"
+            "<label><input type='checkbox' name='clear_qb'> Clear all %d "
+            "quickbar slots</label>"
+            "<p class='note'>Useful after changing classes or removing items, "
+            "when the quickbar still points at things the character no longer "
+            "has. Slot count is preserved.</p></fieldset>"
+            "<fieldset><legend>Level history</legend>%s%s</fieldset>" %
+            (align, text_rows, render_classes_html(d), render_inventory_html(d),
+             len(getv(d, "QBList", [])),
+             render_integrity_html(d), render_levels_html(d)))
 
     body = (
         "<form method='post' action='%s'>%s"
@@ -624,6 +913,7 @@ def render_char_form(d, action, ident_html, is_bic):
         "</table></fieldset>"
         "<fieldset><legend>Abilities</legend><table>%s</table></fieldset>"
         "<fieldset><legend>Stats</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Skill ranks</legend>%s</fieldset>"
         "<fieldset><legend>Appearance</legend><table>%s</table>"
         "<p class='note'>Only fields present in this file are shown; static-"
         "appearance creatures have no head/body-part fields. IDs come from "
@@ -631,13 +921,61 @@ def render_char_form(d, action, ident_html, is_bic):
         "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s"
         "<p>Add feat IDs (comma-separated): "
         "<input type='text' name='addfeats' placeholder='e.g. 1,28,411'></p>"
-        "</fieldset>"
+        "<p class='note'>On a player character, adding a feat here without a "
+        "matching level-up entry will show up in the integrity check below.</p>"
+        "</fieldset>%s"
         "<p class='note'>Blank numeric fields are left unchanged.</p>"
         "<input type='submit' value='Save'></form>" %
         (action, ident_html, esc(loc_get(d, "FirstName")),
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
-         abil, stats, appear, len(feats), feat_boxes or "<p class='note'>none</p>"))
+         abil, stats, render_skills_html(d), appear,
+         len(feats), feat_boxes or "<p class='note'>none</p>", bic_html))
     return body
+
+
+def apply_bic_edits(d, form):
+    """Apply the .bic-only form sections (text fields, classes, carried items,
+    quickbar) onto dict d. Returns True if anything changed.
+
+    LvlStatList is deliberately absent here - it's reported on, never written."""
+    touched = False
+    for name, gff_type in BIC_TEXT_FIELDS:
+        val = form.get(name, [None])[0]
+        if val is not None and name in d and val != getv(d, name):
+            setv(d, name, val, gff_type)
+            touched = True
+    desc = form.get("Description", [None])[0]
+    if desc is not None and "Description" in d \
+            and desc != loc_get(d, "Description"):
+        loc_set(d, "Description", desc)
+        touched = True
+
+    for idx, entry in enumerate(getv(d, "ClassList", [])):
+        for suffix, field, gff_type in (("id", "Class", "int"),
+                                        ("level", "ClassLevel", "short")):
+            val = form.get("class_%d_%s" % (idx, suffix), [""])[0].strip()
+            if not val:
+                continue
+            new = int(val)
+            if getv(entry, field) != new:
+                setv(entry, field, new, gff_type)
+                touched = True
+
+    delitems = {int(x) for x in form.get("delitem", [])}
+    if delitems:
+        entries = getv(d, "ItemList", [])
+        d["ItemList"]["value"] = [e for i, e in enumerate(entries)
+                                  if i not in delitems]
+        touched = True
+
+    # Overwrite every slot rather than emptying the list: the engine expects a
+    # fixed-length quickbar, so length is preserved and only contents reset.
+    if form.get("clear_qb") and getv(d, "QBList"):
+        slots = d["QBList"]["value"]
+        if any(slot != EMPTY_QB_SLOT for slot in slots):
+            slots[:] = [copy.deepcopy(EMPTY_QB_SLOT) for _ in slots]
+            touched = True
+    return touched
 
 
 def apply_char_edits(d, form, is_bic):
@@ -655,7 +993,7 @@ def apply_char_edits(d, form, is_bic):
 
     numeric = [(f, "byte") for f in ABILITY_FIELDS] + STAT_FIELDS + APPEAR_FIELDS
     if is_bic:
-        numeric += BIC_EXTRA_FIELDS
+        numeric += BIC_EXTRA_FIELDS + [(f, t) for f, t, _h in ALIGN_FIELDS]
     for f, gff_type in numeric:
         val = form.get(f, [""])[0].strip()
         if not val:
@@ -664,6 +1002,21 @@ def apply_char_edits(d, form, is_bic):
         if getv(d, f) != new:
             setv(d, f, new, gff_type)
             touched = True
+
+    # SkillList is positional (entry N = skills.2da row N), so ranks are only
+    # ever written in place - never append, remove or reorder, and ignore any
+    # submitted index the file doesn't already have.
+    for idx, entry in enumerate(getv(d, "SkillList", [])):
+        val = form.get("skill_%d" % idx, [""])[0].strip()
+        if not val:
+            continue
+        new = int(val)
+        if getv(entry, "Rank") != new:
+            setv(entry, "Rank", new, "byte")
+            touched = True
+
+    if is_bic and apply_bic_edits(d, form):
+        touched = True
 
     delfeats = {int(x) for x in form.get("delfeat", [])}
     addfeats = [int(x) for x in
@@ -936,8 +1289,15 @@ def main():
                     help="public base URL of that wiki (e.g. /hos1-wiki), "
                          "substituted for the shell's {{ROOT}} asset paths")
     ap.add_argument("--nwn-gff", default=None, help="path to nwn_gff binary")
+    ap.add_argument("--data-dir", default=None, metavar="DIR",
+                    help="Q-nwn-manager's bin/wiki_data (stock 2DA name "
+                         "tables); only affects display labels, IDs still "
+                         "show when it's missing")
     args = ap.parse_args()
 
+    if args.data_dir:
+        global STOCK_DATA_DIR
+        STOCK_DATA_DIR = os.path.abspath(args.data_dir)
     NWN_GFF = find_nwn_gff(args.nwn_gff)
     Handler.root = os.path.abspath(args.dir)
     Handler.bic_root = os.path.abspath(args.bic_dir or args.dir)

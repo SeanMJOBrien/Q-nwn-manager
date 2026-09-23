@@ -23,7 +23,7 @@ project/
 | Command                     | Effect                                                        |
 |------------------------------|----------------------------------------------------------------|
 | `nasher unpack <target>`     | Explodes an existing packed file into JSON sources under `src/` |
-| `nasher compile <target>`    | Compiles `.nss` → `.ncs` via configured compiler (nwnsc or nwn_script_comp) |
+| `nasher compile <target>`    | Compiles `.nss` → `.ncs` via configured compiler (Q-nwn-manager's `nwn-manager repack` always resolves this to the bundled `nwnsc`, on all platforms) |
 | `nasher convert <target>`    | Converts JSON sources → GFF binaries in `.nasher/cache/<target>` |
 | `nasher pack <target>`       | Runs convert + compile as needed, then packs into final module file |
 | `nasher install <target>`    | Packs and copies/installs into the NWN installation directory |
@@ -36,7 +36,10 @@ step in isolation (e.g. checking compiler errors without a full pack).
 ## Config notes (`nasher.cfg`)
 
 - `gffUtil` — path to the `nwn_gff`/`nwn-gff` binary nasher shells out to
-- `nssCompiler` — path to `nwnsc` or `nwn_script_comp`
+- `nssCompiler` — path to `nwnsc` or `nwn_script_comp` (nasher itself accepts
+  either; Q-nwn-manager's `nwn-manager repack` always passes the bundled
+  `nwnsc`, since `nwn_script_comp` isn't shipped upstream for macOS/Windows
+  and has an incompatible CLI)
 - `erfUtil` — path to `nwn_erf` for packing
 - `truncateFloats` — rounds float precision in GFF output to avoid noisy
   diffs from insignificant float changes; useful to enable for a cleaner git

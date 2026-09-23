@@ -9,6 +9,94 @@ trap 'echo "[nwn-manager] ERROR at line $LINENO in ${FUNCNAME[0]:-main}: $BASH_C
 PROG=$(basename "$0")
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
+# Make external tools discoverable as a PATH fallback, so nasher / nwn_gff /
+# nwn_erf / nwnsc are found even when the launching shell's PATH lacks them
+# (common when the console is started from a GUI or a minimal shell). We add:
+#   1) a bundled nwn-tools dir - $NWN_TOOLS_DIR, or the sibling of the repo -
+#      laid out as <root>/<platform>/{nasher,neverwinter,nwnsc,...}
+#   2) the usual Nim install bin dirs (~/.nimble/bin, ~/.local/bin)
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _plat=macos_arm64 ;;
+  Linux)  _plat=linux ;;
+  MINGW*|MSYS*|CYGWIN*) _plat=win ;;
+  *)      _plat="" ;;
+esac
+# Check, in order: an explicit $NWN_TOOLS_DIR, the tools bundled IN this repo
+# (bin/../nwn-tools), then a shared nwn-tools sibling of the repo. win uses
+# a "neverwinter64" subdir; the others use "neverwinter".
+if [[ -n ${_plat:-} ]]; then
+  for _root in "${NWN_TOOLS_DIR:-}" "$SCRIPT_DIR/../nwn-tools" "$SCRIPT_DIR/../../nwn-tools"; do
+    [[ -n $_root && -d "$_root/$_plat" ]] || continue
+    for _d in nasher neverwinter neverwinter64 nwnsc sqlite; do
+      [[ -d "$_root/$_plat/$_d" ]] && PATH="$PATH:$_root/$_plat/$_d"
+    done
+  done
+fi
+# $NWN_TOOLS_DIR may also point straight at a flat directory of binaries.
+[[ -n ${NWN_TOOLS_DIR:-} && -d "${NWN_TOOLS_DIR:-}" ]] && PATH="$PATH:$NWN_TOOLS_DIR"
+for _d in "$HOME/.nimble/bin" "$HOME/.local/bin"; do
+  [[ -d "$_d" ]] && PATH="$PATH:$_d"
+done
+export PATH
+unset _root _plat _d 2>/dev/null || true
+
+# Locate a compiled nwn-pytools binary (built from bin/_pytools_main.py via
+# build/nwn-pytools.spec) under the same nwn-tools/<platform>/ convention
+# used above for nasher/nwn_gff/nwnsc, so wiki/console/edit-areas/serve and
+# the repack dlg-check gate can run without python3 installed. Empty when
+# none is found - run_pytool()/run_pytool_exec() below fall back to today's
+# `python3 <script>` behavior in that case.
+PYTOOLS_BIN=""
+case "$(uname -s 2>/dev/null)" in
+  Darwin) _pt_plat=macos_arm64; _pt_exe="" ;;
+  Linux)  _pt_plat=linux; _pt_exe="" ;;
+  MINGW*|MSYS*|CYGWIN*) _pt_plat=win; _pt_exe=".exe" ;;
+  *)      _pt_plat=""; _pt_exe="" ;;
+esac
+if [[ -n ${_pt_plat:-} ]]; then
+  for _pt_root in "${NWN_TOOLS_DIR:-}" "$SCRIPT_DIR/../nwn-tools" "$SCRIPT_DIR/../../nwn-tools"; do
+    [[ -n $_pt_root ]] || continue
+    _pt_cand="$_pt_root/$_pt_plat/nwn-pytools/nwn-pytools$_pt_exe"
+    if [[ -x $_pt_cand ]]; then
+      PYTOOLS_BIN=$_pt_cand
+      break
+    fi
+  done
+fi
+export PYTOOLS_BIN
+unset _pt_plat _pt_root _pt_cand _pt_exe 2>/dev/null || true
+
+# Run a Python-based subcommand in the foreground, preserving stdout/
+# stderr/exit code: prefer the compiled nwn-pytools binary when found, else
+# fall back to running the real script under python3 (or, for the two
+# dispatcher-only lookups with no standalone script, under the dispatcher
+# source file itself). $1 = subcommand name (wiki/area-editor/wiki-activity/
+# check-dlg-integrity/hak-list/tlk-name); remaining args passed through.
+run_pytool() {
+  local sub=$1; shift
+  if [[ -n $PYTOOLS_BIN ]]; then
+    "$PYTOOLS_BIN" "$sub" "$@"
+  elif [[ $sub == check-dlg-integrity ]]; then
+    "$SCRIPT_DIR/check-dlg-integrity" "$@"
+  elif [[ $sub == hak-list || $sub == tlk-name ]]; then
+    python3 "$SCRIPT_DIR/_pytools_main.py" "$sub" "$@"
+  else
+    python3 "$SCRIPT_DIR/nwn-$sub" "$@"
+  fi
+}
+
+# Same as run_pytool but tail-calls via exec (process replacement) instead
+# of running in the foreground - for cmd_wiki/cmd_console/cmd_edit_areas,
+# which only ever invoke one of the nwn-$sub-named scripts.
+run_pytool_exec() {
+  local sub=$1; shift
+  if [[ -n $PYTOOLS_BIN ]]; then
+    exec "$PYTOOLS_BIN" "$sub" "$@"
+  else
+    exec python3 "$SCRIPT_DIR/nwn-$sub" "$@"
+  fi
+}
+
 usage() {
   cat <<EOF
 $PROG — multi-module manager for NWN1 .mod files.
@@ -36,6 +124,15 @@ Usage:
                           ./unpacked/ into <project>/docs/ (or --out).
                           docs/ is the folder GitHub Pages publishes
                           from. Extra args pass through to nwn-wiki.
+
+  $PROG console [--projects-dir <dir>] [args...]
+                          Serve the multi-project web console: a home page to
+                          upload/ingest a .mod into a new project, rebuild its
+                          wiki, build & download the packed .mod, and bulk-edit
+                          areas. Each project lives in its own subdirectory
+                          under --projects-dir (default: <repo>/projects).
+                          Extra args pass through to the console (--port,
+                          --host, --url-prefix, --wiki-shell, --wiki-base, --nav).
 
   $PROG edit-areas [--dir <dir>] [args...]
                           Serve a local web UI for bulk-editing area event
@@ -85,25 +182,29 @@ Per-project layout (created by 'init'):
 
 Prerequisites (must be on PATH):
   nasher              — nimble install nasher
-  nwn_gff             — nimble install neverwinter
-  nwn_script_comp     — nimble install neverwinter
-  python3             — for 'wiki' subcommand
+  nwn_gff, nwn_erf    — nimble install neverwinter
+  nwnsc               — bundled in nwn-tools/<platform>/nwnsc/, or
+                         squattingmonk/nwnsc release (used by 'repack' to
+                         compile scripts on all platforms)
+  python3             — for 'wiki' and 'console' subcommands
 EOF
 }
 
 # Verify required external CLIs are available; print install hints if not.
+# Portable to bash 3.2 (macOS system bash) - no associative arrays.
 preflight() {
-  declare -A HINT=(
-    [nasher]="nimble install nasher"
-    [nwn_gff]="nimble install neverwinter"
-    [nwn_script_comp]="nimble install neverwinter"
-    [python3]="install Python 3 (system package)"
-  )
-  local missing=0
+  local missing=0 bin hint
   for bin in "$@"; do
     if ! command -v "$bin" >/dev/null 2>&1; then
+      case "$bin" in
+        nasher)                   hint="nimble install nasher" ;;
+        nwn_gff|nwn_erf|nwn_script_comp) hint="nimble install neverwinter" ;;
+        nwnsc)                    hint="bundled in nwn-tools/<platform>/nwnsc/, or squattingmonk/nwnsc release" ;;
+        python3)                  hint="install Python 3 (system package)" ;;
+        *)                        hint="" ;;
+      esac
       echo "error: required tool '$bin' not on PATH" >&2
-      [[ -n "${HINT[$bin]:-}" ]] && echo "       install with: ${HINT[$bin]}" >&2
+      [[ -n "$hint" ]] && echo "       install with: $hint" >&2
       missing=1
     fi
   done
@@ -200,29 +301,24 @@ detect_nwn_userdir() {
   done
 }
 
-# Build the comma-separated list of hak file paths the module declares in
-# its Mod_HakList. Each hak is symlinked into /tmp under a no-space name
-# so it survives nasher's whitespace-splitting of --nssFlags. Echoes the
-# comma-separated list, or empty if module.ifo.json or userdir is missing.
-build_compiler_erfs() {
+# Extract each hak the module declares (via Mod_HakList) into its own
+# scratch directory of plain files, for use as nwnsc's -i include-path list
+# (nwnsc, unlike the old nwn_script_comp --erfs, has no ability to load
+# .hak/.erf archives directly — only plain filesystem directories).
+# Echoes one scratch-dir path per line; empty if module.ifo.json or userdir
+# is missing. NOTE: the caller is responsible for registering the returned
+# paths for cleanup — this function may be invoked via command substitution
+# (a subshell), whose traps do not propagate back to the caller's shell.
+extract_hak_includes() {
   [[ -f unpacked/module.ifo.json ]] || return 0
   local userdir
   userdir=$(detect_nwn_userdir) || return 0
   [[ -d "$userdir/hak" ]] || return 0
 
   local haks
-  haks=$(python3 -c '
-import json, sys
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    for h in d.get("Mod_HakList", {}).get("value", []):
-        n = h.get("Mod_Hak", {}).get("value", "").strip()
-        if n: print(n)
-except Exception:
-    pass') || return 0
+  haks=$(run_pytool hak-list "unpacked/module.ifo.json") || return 0
 
-  local out=""
-  local h hak link
+  local h hak dir
   while IFS= read -r h; do
     [[ -z $h ]] && continue
     hak="$userdir/hak/${h}.hak"
@@ -230,13 +326,14 @@ except Exception:
       echo "[$PROG] warn: declared hak $h.hak not found at $hak — compiler may miss its includes" >&2
       continue
     fi
-    link="/tmp/nwnmgr_hak_${h}.hak"
-    ln -sfn "$hak" "$link"
-    out+="${link},"
+    dir=$(mktemp -d "${TMPDIR:-/tmp}/nwnmgr_hakx_${h}_XXXXXX")
+    if ( cd "$dir" && nwn_erf -x -f "$hak" ) >/dev/null 2>&1; then
+      printf '%s\n' "$dir"
+    else
+      echo "[$PROG] warn: failed to extract $h.hak — compiler may miss its includes" >&2
+      rm -rf "$dir"
+    fi
   done <<< "$haks"
-
-  out="${out%,}"
-  printf '%s\n' "$out"
 }
 
 # Extract the base dialog.tlk and the custom TLK (named in module.ifo's
@@ -267,14 +364,7 @@ extract_tlks() {
 
   local custom_name=""
   if [[ -f unpacked/module.ifo.json ]]; then
-    custom_name=$(python3 -c '
-import json, sys
-try:
-    d = json.load(open("unpacked/module.ifo.json"))
-    v = d.get("Mod_CustomTlk", {}).get("value", "")
-    print(str(v).strip())
-except Exception:
-    pass' 2>/dev/null || true)
+    custom_name=$(run_pytool tlk-name "unpacked/module.ifo.json" 2>/dev/null || true)
   fi
   if [[ -n $custom_name ]]; then
     local custom=""
@@ -488,7 +578,7 @@ cmd_repack() {
   if [[ $no_smoke -eq 0 && -x "$SCRIPT_DIR/check-dlg-integrity" && -d "$root/unpacked" ]]; then
     echo "[$PROG] checking dialog integrity: unpacked/*.dlg.json"
     local dlg_out dlg_exit
-    dlg_out=$("$SCRIPT_DIR/check-dlg-integrity" "$root/unpacked" 2>&1) && dlg_exit=0 || dlg_exit=$?
+    dlg_out=$(run_pytool check-dlg-integrity "$root/unpacked" 2>&1) && dlg_exit=0 || dlg_exit=$?
     [[ -n $dlg_out ]] && echo "$dlg_out"
     if (( dlg_exit != 0 )); then
       echo "[$PROG] dialog-integrity check FAILED — aborting repack (nothing built or installed)" >&2
@@ -518,27 +608,103 @@ cmd_repack() {
     fi
   fi
 
-  # Build --erfs flag pointing at the haks the module declares so the
-  # script compiler can resolve includes (e.g. zep_inc_main.nss,
-  # ITEM_PROPERTY_BOOMERANG, gplotAppraiseOpenStore from CEP / engine
-  # base). Without this, nasher only sees nss in unpacked/ and most
-  # CEP-dependent scripts fail to compile.
-  local erfs
-  erfs=$(build_compiler_erfs)
-  local pack_args=(--yes)
-  if [[ -n $erfs ]]; then
-    # -y: continue past per-script errors so we see the full picture instead
-    # of stopping at the first one and reporting "0 of N compiled".
-    pack_args+=("--nssFlags:-y --erfs=$erfs")
-    echo "[$PROG] compiler --erfs: $erfs"
+  # All cleanup (hak-extraction scratch dirs below, plus the build-stamp
+  # file further down) is accumulated into this single EXIT trap. A second
+  # `trap ... EXIT` call OVERWRITES rather than adds to the first, so every
+  # site that needs cleanup must append to $_repack_cleanup_paths and
+  # re-register the trap with the full accumulated string — never call
+  # `trap ... EXIT` with a partial/one-off value.
+  _repack_cleanup_paths=""
+
+  # Resolve the bundled base-game scripts dir (nwscript.nss and the base/SoU/
+  # HotU includes). The old nwn_script_comp could pull these straight out of
+  # a live NWN install's .bif/.key files via --root; nwnsc has no equivalent
+  # that works on server-only boxes with no game client installed, so a
+  # pre-extracted copy is vendored at nwn-tools/base-scripts/ instead.
+  local base_scripts=""
+  if [[ -n ${NWN_BASE_SCRIPTS_DIR:-} && -d $NWN_BASE_SCRIPTS_DIR ]]; then
+    base_scripts=$NWN_BASE_SCRIPTS_DIR
+  elif [[ -n ${NWN_TOOLS_DIR:-} && -d "$NWN_TOOLS_DIR/base-scripts" ]]; then
+    base_scripts="$NWN_TOOLS_DIR/base-scripts"
+  elif [[ -d "$SCRIPT_DIR/../nwn-tools/base-scripts" ]]; then
+    base_scripts="$SCRIPT_DIR/../nwn-tools/base-scripts"
+  elif [[ -d "$SCRIPT_DIR/../../nwn-tools/base-scripts" ]]; then
+    base_scripts="$SCRIPT_DIR/../../nwn-tools/base-scripts"
+  fi
+  if [[ -z $base_scripts ]]; then
+    echo "[$PROG] warn: no base-scripts dir found (checked \$NWN_BASE_SCRIPTS_DIR, nwn-tools/base-scripts) — base-game includes like nwscript.nss may fail to resolve" >&2
   fi
 
-  # Wrap nwn_script_comp so the --root/--userdirectory paths nasher
-  # auto-detects (which contain "Neverwinter Nights" with a space) get
-  # symlinked to no-space /tmp paths before invocation.
-  local wrapper="$SCRIPT_DIR/nwn_script_comp_wrapper"
-  if [[ -x $wrapper ]]; then
-    pack_args+=("--nssCompiler:$wrapper")
+  # Extract the haks the module declares so the compiler can resolve
+  # includes (e.g. zep_inc_main.nss, ITEM_PROPERTY_BOOMERANG,
+  # gplotAppraiseOpenStore from CEP / engine base). Without this, nwnsc only
+  # sees nss in unpacked/ and most CEP-dependent scripts fail to compile.
+  # Read via process substitution (not a pipe) so the loop runs in THIS
+  # shell, not a subshell — needed for both array/variable accumulation
+  # below to actually persist past the loop.
+  local nss_include_dirs=()
+  [[ -n $base_scripts ]] && nss_include_dirs+=("$base_scripts")
+  local hak_dir
+  while IFS= read -r hak_dir; do
+    [[ -z $hak_dir ]] && continue
+    nss_include_dirs+=("$hak_dir")
+    _repack_cleanup_paths+=" $(printf '%q' "$hak_dir")"
+  done < <(extract_hak_includes)
+  [[ -n $_repack_cleanup_paths ]] && trap "rm -rf${_repack_cleanup_paths}" EXIT
+
+  # nwnsc resolves #include "X" by looking for a file literally named X.nss —
+  # unlike nwn_script_comp's resman, it is case-sensitive. Base-game/CEP
+  # scripts (and some project scripts) were written assuming a
+  # case-insensitive filesystem, so on Linux/most macOS setups those includes
+  # fail with NSC1085 "Unable to open the include file" unless a directory of
+  # case-corrected symlinks is generated and added to -i. See
+  # nwn-tools/gen_include_shims.sh for details.
+  local shim_script=""
+  if [[ -n ${NWN_TOOLS_DIR:-} && -x "$NWN_TOOLS_DIR/gen_include_shims.sh" ]]; then
+    shim_script="$NWN_TOOLS_DIR/gen_include_shims.sh"
+  elif [[ -x "$SCRIPT_DIR/../nwn-tools/gen_include_shims.sh" ]]; then
+    shim_script="$SCRIPT_DIR/../nwn-tools/gen_include_shims.sh"
+  elif [[ -x "$SCRIPT_DIR/../../nwn-tools/gen_include_shims.sh" ]]; then
+    shim_script="$SCRIPT_DIR/../../nwn-tools/gen_include_shims.sh"
+  fi
+  if [[ -n $shim_script && -d "$root/unpacked" ]]; then
+    local shim_dir
+    shim_dir=$(mktemp -d "${TMPDIR:-/tmp}/nwnmgr_shims_XXXXXX")
+    _repack_cleanup_paths+=" $(printf '%q' "$shim_dir")"
+    trap "rm -rf${_repack_cleanup_paths}" EXIT
+    # ${nss_include_dirs[@]+"${nss_include_dirs[@]}"}, not "${arr[@]:-}": the
+    # array can be genuinely empty here (no base-scripts dir, no haks), and
+    # ":-" would pass one stray empty-string directory argument instead of
+    # zero - gen_include_shims.sh/nwnsc would then treat "" as a real (and
+    # wrong) path segment rather than simply having one fewer directory.
+    if "$shim_script" "$shim_dir" "$root/unpacked" \
+        ${nss_include_dirs[@]+"${nss_include_dirs[@]}"} >&2; then
+      nss_include_dirs=("$shim_dir" ${nss_include_dirs[@]+"${nss_include_dirs[@]}"})
+    else
+      echo "[$PROG] warn: gen_include_shims.sh failed — case-mismatched #includes may not resolve" >&2
+    fi
+  else
+    echo "[$PROG] warn: gen_include_shims.sh not found — case-mismatched #includes (e.g. NW_I0_SPELLS vs nw_i0_spells.nss) may fail to resolve" >&2
+  fi
+
+  local pack_args=(--yes)
+  local nwnsc_bin
+  nwnsc_bin=$(command -v nwnsc || true)
+  if [[ -n $nwnsc_bin ]]; then
+    pack_args+=("--nssCompiler:$nwnsc_bin")
+    if [[ ${#nss_include_dirs[@]} -gt 0 ]]; then
+      local nss_include
+      nss_include=$(IFS=';'; echo "${nss_include_dirs[*]}")
+      # -lowqey: load base resources, optimize, non-BioWare extensions,
+      # quiet, continue-on-error — the exact flag string already proven in
+      # production across this user's other nasher/nwnsc projects.
+      pack_args+=("--nssFlags:-lowqey -i $nss_include")
+      echo "[$PROG] compiler: $nwnsc_bin -i $nss_include"
+    else
+      echo "[$PROG] compiler: $nwnsc_bin (no -i include dirs resolved)"
+    fi
+  else
+    echo "[$PROG] warn: nwnsc not found — nasher will fall back to its own default compiler resolution" >&2
   fi
 
   # Build stamp (module-agnostic; opt-in at runtime): generate a tiny script that
@@ -587,9 +753,13 @@ cmd_repack() {
 // Opt in from any module event: ExecuteScript("nwnmgr_bstamp", oPC);
 void main() { SendMessageToPC(OBJECT_SELF, "Module last edited: $stamp_esc"); }
 EOF
-    # Expand the path into the trap NOW (set-time): $stamp_nss is function-local and
-    # is out of scope by the time an EXIT trap would run.
-    trap "rm -f $(printf '%q' "$stamp_nss")" EXIT
+    # Expand the path into the trap NOW (set-time): $stamp_nss is function-local
+    # and is out of scope by the time an EXIT trap would run. Merge into the
+    # shared cleanup accumulator (see note above) rather than a standalone
+    # `trap ... EXIT` call, which would silently drop the hak-scratch-dir
+    # cleanup registered earlier.
+    _repack_cleanup_paths+=" $(printf '%q' "$stamp_nss")"
+    trap "rm -rf${_repack_cleanup_paths}" EXIT
     echo "[$PROG] build stamp: $stamp"
   fi
 
@@ -676,7 +846,40 @@ cmd_wiki() {
     tlk_args+=(--custom-tlk "$custom")
   fi
 
-  exec "$SCRIPT_DIR/nwn-wiki" --src unpacked --out "$out" "${tlk_args[@]}" "$@"
+  # ${tlk_args[@]+"${tlk_args[@]}"} (not a bare ${tlk_args[@]}): tlk_args may
+  # end up genuinely empty (no tlk/dialog.tlk and no NWN install detected),
+  # and expanding a zero-element array with plain ${arr[@]} raises "unbound
+  # variable" under `set -u` on bash < 4.4 (e.g. macOS's system bash 3.2),
+  # even though the array itself was declared with `local tlk_args=()`.
+  # (${arr[@]:-} avoids the crash too, but wrongly passes one stray
+  # empty-string argument when the array is empty instead of zero arguments
+  # - use the ${arr[@]+"${arr[@]}"} form, already used for $pass_through
+  # above, which is correct in both cases.)
+  run_pytool_exec wiki --src unpacked --out "$out" \
+    ${tlk_args[@]+"${tlk_args[@]}"} "$@"
+}
+
+cmd_console() {
+  # Multi-project console. Unlike edit-areas, it is NOT scoped to the current
+  # project - it manages every project under --projects-dir. Default projects
+  # dir is a sibling of the repo (SCRIPT_DIR/../projects).
+  local projects_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --projects-dir)
+        [[ -n ${2:-} ]] || { echo "error: --projects-dir requires a directory" >&2; exit 2; }
+        projects_dir=$2; shift 2
+        ;;
+      *) break ;;
+    esac
+  done
+  if [[ -z $projects_dir ]]; then
+    projects_dir=$(cd "$SCRIPT_DIR/.." && pwd)/projects
+  fi
+  mkdir -p "$projects_dir"
+  run_pytool_exec area-editor --projects-dir "$projects_dir" \
+    --nwn-manager "$SCRIPT_DIR/nwn-manager" \
+    --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
 cmd_edit_areas() {
@@ -698,7 +901,9 @@ cmd_edit_areas() {
     esac
   done
 
-  exec "$SCRIPT_DIR/nwn-area-editor" --dir "$dir" "$@"
+  run_pytool_exec area-editor --dir "$dir" \
+    --nwn-manager "$SCRIPT_DIR/nwn-manager" \
+    --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
 cmd_serve() {
@@ -765,6 +970,12 @@ cmd_serve() {
   for d in "${log_dirs[@]}"; do
     log_dir_args+=(--log-dir "$d")
   done
+  # cache_args/db_dir_args are optional and may stay genuinely empty (no
+  # --activity-cache/--db-dir passed) - always expand them as
+  # ${arr[@]+"${arr[@]}"} below (matches $pass_through/$tlk_args elsewhere in
+  # this file), never a bare "${arr[@]}" (raises "unbound variable" under
+  # `set -u` on bash < 4.4 for a zero-element array) or "${arr[@]:-}" (avoids
+  # the crash but wrongly passes one stray empty-string argument).
   local cache_args=()
   [[ -n $activity_cache ]] && cache_args+=(--activity-cache "$activity_cache")
   local db_dir_args=()
@@ -794,12 +1005,12 @@ cmd_serve() {
     # the last poll window.  This fires at most once per poll period per
     # session end, naturally self-clears when the window expires, and
     # survives monitor restarts without any saved state.
-    if python3 "$wiki_activity" --check-should-refresh "$poll_secs" \
-        "${log_dir_args[@]}" "${cache_args[@]}" "${since_args[@]}" 2>/dev/null; then
+    if run_pytool wiki-activity --check-should-refresh "$poll_secs" \
+        "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" 2>/dev/null; then
       echo "[$PROG] serve: $_now — no players + recent logout; refreshing activity page"
-      if python3 "$wiki_activity" \
+      if run_pytool wiki-activity \
           --src unpacked --out docs \
-          "${log_dir_args[@]}" "${cache_args[@]}" "${since_args[@]}" "${db_dir_args[@]}"; then
+          "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" ${db_dir_args[@]+"${db_dir_args[@]}"}; then
         echo "[$PROG] serve: activity page refreshed"
         if [[ $auto_publish -eq 1 ]]; then
           local ts
@@ -832,8 +1043,8 @@ cmd_serve() {
           echo "[$PROG] serve: warn: backup command failed (rc=$?)" >&2
         fi
       fi
-    elif python3 "$wiki_activity" --check-online \
-        "${log_dir_args[@]}" "${cache_args[@]}" "${since_args[@]}" 2>/dev/null; then
+    elif run_pytool wiki-activity --check-online \
+        "${log_dir_args[@]}" ${cache_args[@]+"${cache_args[@]}"} "${since_args[@]}" 2>/dev/null; then
       echo "[$PROG] serve: $_now — poll: players online"
     fi
     sleep "$poll_secs"
@@ -843,20 +1054,25 @@ cmd_serve() {
 main() {
   case "${1:-}" in
     init)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      # Unpacking only needs nasher + nwn_gff (no script compilation).
+      shift; preflight nasher nwn_gff
       cmd_init "$@"
       ;;
     unpack)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      shift; preflight nasher nwn_gff
       cmd_unpack "$@"
       ;;
     repack)
-      shift; preflight nasher nwn_gff nwn_script_comp
+      shift; preflight nasher nwn_gff nwn_erf nwnsc
       cmd_repack "$@"
       ;;
     wiki)
       shift; preflight python3
       cmd_wiki "$@"
+      ;;
+    console)
+      shift; preflight python3
+      cmd_console "$@"
       ;;
     edit-areas)
       shift; preflight python3

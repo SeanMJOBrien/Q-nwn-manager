@@ -9,6 +9,15 @@ A local, dependency-free (Python 3 stdlib only) web app for selective bulk
 editing of NWN:EE GFF data. All edits round-trip through `nwn_gff`
 (GFF -> JSON -> edit -> GFF); only submitted, non-blank fields change.
 
+> **Managing whole projects (upload / wiki / build / download)?** Use the
+> multi-project **web console** instead: `nwn-manager console` (see the repo
+> README "Web console" section). It hosts a home page to upload/ingest a `.mod`
+> into a new project, rebuild its wiki, build & download the packed `.mod`, and
+> bulk-edit areas + creatures + module info — all JSON-native against a nasher
+> `unpacked/` tree, with background-job progress. This `nwn_web_editor.py`
+> remains the tool for editing player **`.bic`** character files (binary GFF
+> under a servervault), which live outside a project's `unpacked/`.
+
 ## Launch
 
 ```bash
@@ -53,6 +62,15 @@ python3 ~/.claude/skills/nwn-web-editor/scripts/nwn_web_editor.py \
 | `/module` | edit `module.ifo`'s Mod_Name (title) and Mod_Description together, as the toolset's Module Properties tab does |
 
 ## Area map generator (scripts/nwn_area_map.py)
+
+The multi-project web console (`nwn-manager console`) has a live version of
+this built in, at `/p/<slug>/areas/map` (or `/areas/map` in legacy single-dir
+mode) — same layout algorithm, reading `unpacked/*.are.json`/`*.git.json`
+directly (no `nwn_gff` needed) and linking each area node straight into that
+project's own edit forms. Use this standalone script instead when you want a
+single portable HTML file (no running server needed, e.g. to attach to an
+issue or host statically) or need to point at a flat binary-GFF directory
+outside a nasher project.
 
 Companion script producing a **self-contained pan/zoomable HTML map** of all
 areas, laid out by the cardinal directions implied by door/trigger

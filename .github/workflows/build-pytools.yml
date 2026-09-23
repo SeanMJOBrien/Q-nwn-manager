@@ -1,0 +1,120 @@
+name: Build nwn-pytools
+
+# Builds the nwn-pytools native binary (build/nwn-pytools.spec, PyInstaller
+# --onedir) on each of the three platforms this repo already vendors
+# third-party tools for (nwn-tools/{linux,macos_arm64,win}/), then commits
+# the result into nwn-tools/<platform>/nwn-pytools/ on this branch - matching
+# the existing convention of committing vendored binaries directly to git,
+# rather than publishing them as release/workflow artifacts only. That means
+# every run that actually changes one of the four wrapped scripts produces a
+# real commit; see the "commit" job below.
+#
+# Manual run: Actions tab -> "Build nwn-pytools" -> Run workflow.
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [feature/native-binaries]
+    paths:
+      - "bin/_pytools_main.py"
+      - "bin/nwn-wiki"
+      - "bin/nwn-area-editor"
+      - "bin/nwn-wiki-activity"
+      - "bin/check-dlg-integrity"
+      - "bin/wiki_data/**"
+      - "bin/wiki_assets/**"
+      - "build/nwn-pytools.spec"
+      - ".github/workflows/build-pytools.yml"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            plat: linux
+            bin_name: nwn-pytools
+          - os: macos-14
+            plat: macos_arm64
+            bin_name: nwn-pytools
+          - os: windows-latest
+            plat: win
+            bin_name: nwn-pytools.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Build
+        run: pyinstaller --clean --noconfirm build/nwn-pytools.spec
+
+      # Exercises the dispatcher end to end on the real compiled artifact -
+      # every subcommand except wiki/area-editor/wiki-activity (which need a
+      # real unpacked/ project tree; those are covered by
+      # tests/test_pytools_dispatcher.py against the source scripts, not the
+      # compiled binary, on every push regardless of platform).
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -e
+          BIN="dist/nwn-pytools/${{ matrix.bin_name }}"
+          echo '{"Mod_HakList":{"type":"list","value":[{"Mod_Hak":{"type":"cexostring","value":"smoketesthak"}}]},"Mod_CustomTlk":{"type":"cexostring","value":"smoketesttlk"}}' > /tmp/module.ifo.json
+          [ "$("$BIN" hak-list /tmp/module.ifo.json)" = "smoketesthak" ]
+          [ "$("$BIN" tlk-name /tmp/module.ifo.json)" = "smoketesttlk" ]
+          mkdir -p /tmp/empty_unpacked
+          "$BIN" check-dlg-integrity /tmp/empty_unpacked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nwn-pytools-${{ matrix.plat }}
+          path: dist/nwn-pytools/
+
+  commit:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nwn-pytools-*
+          path: /tmp/artifacts
+
+      - name: Install into nwn-tools/<platform>/nwn-pytools/
+        run: |
+          set -e
+          for plat in linux macos_arm64 win; do
+            src="/tmp/artifacts/nwn-pytools-$plat"
+            [ -d "$src" ] || continue
+            dest="nwn-tools/$plat/nwn-pytools"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            cp -a "$src/." "$dest/"
+            # actions/upload-artifact zips its payload, which drops the
+            # executable bit on POSIX binaries - restore it.
+            if [ "$plat" != "win" ]; then
+              chmod +x "$dest/nwn-pytools"
+            fi
+          done
+
+      - name: Commit rebuilt binaries
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nwn-tools/linux/nwn-pytools nwn-tools/macos_arm64/nwn-pytools nwn-tools/win/nwn-pytools
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+            exit 0
+          fi
+          git commit -m "Rebuild nwn-pytools binaries (CI: ${{ github.sha }})"
+          git push

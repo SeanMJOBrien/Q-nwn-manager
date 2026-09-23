@@ -103,7 +103,44 @@ areas may visibly ignore sun/moon settings (engine behavior, not app).
 
 ---
 
-## 4. Area tags & resrefs
+## 4. Area music
+
+**Purpose:** set the day/night/battle ambient tracks across whole categories
+of areas without the toolset's Music properties tab.
+
+**UI flow:** form prefilled with the **first selected area's** current values
+(as reference; multi-area edits apply uniformly). POST `/areas/music/apply`.
+
+**Fields touched (.are):** `MusicDay`/`MusicNight`/`MusicBattle` (int,
+ambientmusic.2da row index — 0 = none), `MusicDelay` (byte, 0 = start
+immediately / 1 = delay the day track).
+
+**Name lookup:** `MusicDay`/`MusicNight`/`MusicBattle` render as a `<select>`
+of "row - Title" options (e.g. `2 - Rural Day 2`), matching what the
+toolset's own Day/Night/Battle pickers show, instead of a bare row number.
+Titles come from `bin/wiki_data/music.json`, built by
+`_build_stock.py` from `ambientmusic.2da`'s `Description` TLK strref (base
+game tracks) with a `DisplayName` literal fallback for expansion-pack
+tracks that carry no strref (Daggerford/HotU stingers). Same
+`_load_stock_json`/graceful-fallback contract as `class_name`/`feat_name`/
+`skill_name`: if `music.json` is missing, the fields fall back to plain
+number inputs with the old "look it up yourself" hint — never a crash.
+Only covers ambientmusic.2da rows the base game (or whatever install
+`_build_stock.py` ran against) actually has; a HAK-added custom track past
+row 137 shows as a bare number until `music.json` is regenerated against
+that install/module.
+
+**Blank semantics:** blank ("(leave unchanged)") = keep per-area current
+value on every selected area.
+
+**Limitations:** no custom-TLK resolution for module-added ambientmusic.2da
+rows (module haks that append rows with strrefs into their own custom TLK,
+not dialog.tlk) — `_build_stock.py` only reads the stock table off a base
+NWN install; `resolve_name`'s custom-TLK dict is always empty here.
+
+---
+
+## 5. Area tags & resrefs
 
 **Purpose:** rename an area's script-visible identity (Tag) and, when truly
 needed, its file identity (ResRef).
@@ -126,7 +163,7 @@ only the offending rename, not the whole batch.
 
 ---
 
-## 5. Player character (.bic) browser & editor
+## 6. Player character (.bic) browser & editor
 
 **Purpose:** inspect and fix up player characters directly in a servervault —
 restore lost gold/XP, grant or strip a feat, fix a broken appearance.
@@ -142,7 +179,7 @@ form -> POST `/bic/apply`.
 `Tag`), abilities (`Str`..`Cha`), stats (`NaturalAC`, `HitPoints`,
 `CurrentHitPoints`, `MaxHitPoints`, `fortbonus/refbonus/willbonus`,
 `ChallengeRating`), bic extras (`Experience`, `Gold`, `Age`), appearance
-(section 6's field set), feats (section 6's add/remove model).
+(section 7's field set), feats (section 7's add/remove model).
 
 **Blank semantics:** blank numeric = keep. Name/Tag inputs are prefilled with
 current values, so an unchanged submit is a no-op (equality-checked before
@@ -157,7 +194,7 @@ write).
 
 ---
 
-## 6. Creature blueprint (.utc) editor
+## 7. Creature blueprint (.utc) editor
 
 **Purpose:** tune module NPCs/monsters — stats, feats, appearance — without
 the toolset.
