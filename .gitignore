@@ -11,3 +11,4 @@ __pycache__/
 # itself is committed; its output goes to nwn-tools/<platform>/nwn-pytools/,
 # not here).
 /build/nwn-pytools/
+.DS_Store
