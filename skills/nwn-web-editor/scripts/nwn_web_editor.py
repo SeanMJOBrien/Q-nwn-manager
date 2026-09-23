@@ -1315,7 +1315,12 @@ def main():
     print("data dir: %s" % Handler.root)
     print("bic dir:  %s" % Handler.bic_root)
     print("Serving on http://%s:%d/ (Ctrl-C to stop)" % (args.host, args.port))
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":
