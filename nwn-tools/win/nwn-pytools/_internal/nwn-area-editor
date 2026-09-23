@@ -590,6 +590,15 @@ MUSIC_FIELDS = [
 AREA_FLAG_INTERIOR = 1
 AREA_FLAG_UNDERGROUND = 2
 AREA_FLAG_NATURAL = 4
+# (form-field suffix, bit, label) for the editable flag checkboxes. Any bit
+# outside AREA_FLAG_KNOWN is preserved verbatim on save - the three above are
+# the only ones whose meaning is confirmed, and a toolset build may set others.
+AREA_FLAG_FIELDS = [
+    ("natural", AREA_FLAG_NATURAL, "Outside"),
+    ("interior", AREA_FLAG_INTERIOR, "Interior"),
+    ("underground", AREA_FLAG_UNDERGROUND, "Underground"),
+]
+AREA_FLAG_KNOWN = AREA_FLAG_INTERIOR | AREA_FLAG_UNDERGROUND | AREA_FLAG_NATURAL
 
 # Stock NWN1 tileset resrefs -> human-readable names (from bin/nwn-wiki,
 # reused verbatim). Covers only stock tilesets; haks (e.g. CEP) add custom
@@ -712,7 +721,7 @@ def render_areas(root, query):
         "<button form='areasSelect' name='action' value='scripts'>Edit scripts</button>"
         "<button form='areasSelect' name='action' value='lighting'>Edit lighting/fog</button>"
         "<button form='areasSelect' name='action' value='music'>Edit music</button>"
-        "<button form='areasSelect' name='action' value='tags'>Edit tags</button>"
+        "<button form='areasSelect' name='action' value='tags'>Edit names/tags</button>"
         "<button form='areasSelect' name='action' value='edit_creatures'>Edit placed creatures</button>"
         "<button form='areasSelect' name='action' value='remove_objects'>Remove objects</button>"
         "</div></div>",
@@ -897,15 +906,31 @@ def render_tags_form(root, resrefs):
     rows = []
     for res in resrefs:
         d = load_cached(are_path(root, res))
+        flags = getv(d, "Flags", 0)
+        boxes = "".join(
+            "<label style='display:inline-block;margin-right:.6em'>"
+            "<input type='checkbox' name='flag_%s_%s'%s> %s</label>" %
+            (esc(res), field, " checked" if flags & bit else "", esc(label))
+            for field, bit, label in AREA_FLAG_FIELDS)
         rows.append(
-            "<tr><td>%s</td><td>%s</td>"
+            "<tr><td>%s</td>"
+            "<td><input type='text' name='name_%s' value='%s'></td>"
             "<td><input type='text' name='tag_%s' value='%s'></td>"
+            "<td><input type='hidden' name='flags_present_%s' value='1'>%s</td>"
             "<td><input type='text' name='ref_%s' placeholder='(keep %s)'></td></tr>" %
-            (esc(res), esc(loc_get(d, "Name")), esc(res),
-             esc(getv(d, "Tag", "")), esc(res), esc(res)))
+            (esc(res),
+             esc(res), esc(loc_get(d, "Name")),
+             esc(res), esc(getv(d, "Tag", "")),
+             esc(res), boxes,
+             esc(res), esc(res)))
     body = ("<form method='post' action='%s'>%s"
             "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
-            "<th>New ResRef (renames files!)</th></tr>%s</table>"
+            "<th>Area type</th><th>New ResRef (renames files!)</th></tr>"
+            "%s</table>"
+            "<p class='note'>Name is the area's display name (the map/area "
+            "label players see); Tag is what scripts match on. A blank Name or "
+            "Tag leaves that field unchanged. Area type sets the .are Flags "
+            "bits the area list filters on.</p>"
             "<p class='warn'>ResRef rename moves the .are.json/.git.json/"
             ".gic.json files on disk and rewrites the ResRef field, but does "
             "NOT update door/trigger transitions in other areas that target "
@@ -914,7 +939,7 @@ def render_tags_form(root, resrefs):
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows),
              purl("/areas")))
-    return page("Edit area tags / resrefs", body)
+    return page("Edit area names / tags / resrefs", body)
 
 
 def apply_tags(root, git_root, gic_root, form):
@@ -923,10 +948,28 @@ def apply_tags(root, git_root, gic_root, form):
         path = are_path(root, res)
         d = json_load(path)
         touched = False
+        new_name = form.get("name_" + res, [""])[0].strip()
+        if new_name and new_name != loc_get(d, "Name"):
+            loc_set(d, "Name", new_name)
+            touched = True
         new_tag = form.get("tag_" + res, [""])[0].strip()
         if new_tag and new_tag != getv(d, "Tag"):
             setv(d, "Tag", new_tag, "cexostring")
             touched = True
+        # Checkboxes only submit when ticked, so a hidden marker distinguishes
+        # "this form had no flag boxes" (leave Flags alone) from "every box was
+        # deliberately unticked" (clear all three) - the same technique the
+        # Dropable checkboxes in apply_char_edits already use.
+        if form.get("flags_present_" + res):
+            old_flags = getv(d, "Flags", 0)
+            bits = 0
+            for field, bit, _label in AREA_FLAG_FIELDS:
+                if form.get("flag_%s_%s" % (res, field)):
+                    bits |= bit
+            new_flags = (old_flags & ~AREA_FLAG_KNOWN) | bits
+            if new_flags != old_flags:
+                setv(d, "Flags", new_flags, "dword")
+                touched = True
         new_ref = form.get("ref_" + res, [""])[0].strip().lower()
         if new_ref and new_ref != res:
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
@@ -952,7 +995,7 @@ def apply_tags(root, git_root, gic_root, form):
                     os.replace(old_p, os.path.join(base, new_ref + ext))
                     invalidate(old_p)
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
-    return result_page("Tags updated", changed, resrefs, extra)
+    return result_page("Names / tags updated", changed, resrefs, extra)
 
 
 def result_page(title, changed, selected, extra=""):
@@ -1547,7 +1590,7 @@ MAP_PAGE = """<!doctype html>
  &#183; &#9660; dashed box = underground (layered onto the surface cell it overlaps)</div>
 <div id="popup"><span class="close">&#10005;</span><b id="ptitle"></b>
  <a id="plight" target="_blank">Lighting &amp; fog settings</a>
- <a id="ptags" target="_blank">Tag / resref</a>
+ <a id="ptags" target="_blank">Name / tag / resref</a>
  <a id="pscripts" target="_blank">Event scripts</a>
  <a id="pobjects" target="_blank">Remove objects</a>
  <a id="pcreatures" target="_blank">Edit placed creatures</a>
@@ -1743,6 +1786,10 @@ def portrait_name(portrait_id):
 
 def feat_name(feat_id):
     return _load_stock_json("feat").get(str(feat_id), str(feat_id))
+
+
+def skill_name(skill_id):
+    return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
 
 
 def utc_path(root, res):
@@ -2067,6 +2114,28 @@ def render_equipment(root, d):
     return equip_html + carried_html + note
 
 
+def render_skills_html(d):
+    """Skill-rank inputs. SkillList is POSITIONAL - entry N is row N of
+    skills.2da and carries nothing but its Rank, so the index *is* the skill
+    identity. Render in file order and never sort: reordering the list would
+    silently reassign every skill on the creature."""
+    entries = getv(d, "SkillList", [])
+    if not entries:
+        return ("<p class='note'>No SkillList on this file - nothing to edit. "
+                "Creating one would mean guessing the module's full skills.2da "
+                "row order, so it's left alone.</p>")
+    rows = "".join(
+        "<tr><td>%s</td><td><input type='text' name='skill_%d' value='%s' "
+        "size='4'></td></tr>" %
+        (esc(skill_name(idx)), idx, esc(getv(entry, "Rank", 0)))
+        for idx, entry in enumerate(entries))
+    return ("<table>%s</table>"
+            "<p class='note'>Ranks only - the game adds ability, item and feat "
+            "modifiers on top. Blank leaves a rank unchanged. Rows are in "
+            "skills.2da order; a row labelled 'skill N' isn't in the bundled "
+            "stock table (a hak added it).</p>" % rows)
+
+
 def render_char_form(d, action, ident_html, root):
     def num_input(f):
         return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
@@ -2103,6 +2172,7 @@ def render_char_form(d, action, ident_html, root):
         "</table></fieldset>"
         "<fieldset><legend>Abilities</legend><table>%s</table></fieldset>"
         "<fieldset><legend>Stats</legend><table>%s</table></fieldset>"
+        "<fieldset><legend>Skill ranks</legend>%s</fieldset>"
         "<fieldset><legend>Loot</legend><table>"
         "<tr><td>Lootable</td><td>%s</td></tr></table>"
         "<p class='note'>No means the death inventory screen never opens for "
@@ -2121,7 +2191,8 @@ def render_char_form(d, action, ident_html, root):
         "<input type='submit' value='Save'></form>" %
         (action, ident_html, esc(loc_get(d, "FirstName")),
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
-         abil, stats, loot_select, portrait, appear, render_equipment(root, d), len(feats),
+         abil, stats, render_skills_html(d), loot_select, portrait, appear,
+         render_equipment(root, d), len(feats),
          feat_boxes or "<p class='note'>none</p>"))
 
 
@@ -2146,6 +2217,19 @@ def apply_char_edits(d, form):
         new = float(val) if gff_type == "float" else int(val)
         if getv(d, f) != new:
             setv(d, f, new, gff_type)
+            touched = True
+
+    # SkillList is positional (entry N = skills.2da row N), so ranks are only
+    # ever written in place - never append, remove or reorder, and ignore any
+    # submitted index the file doesn't already have (a hak-extended skills.2da
+    # on the rendering side must not grow the creature's list).
+    for idx, entry in enumerate(getv(d, "SkillList", [])):
+        val = form.get("skill_%d" % idx, [""])[0].strip()
+        if not val:
+            continue
+        new = int(val)
+        if getv(entry, "Rank") != new:
+            setv(entry, "Rank", new, "byte")
             touched = True
 
     lootable = form.get("Lootable", [None])[0]
@@ -2340,7 +2424,54 @@ def module_ifo_path(root):
     return os.path.join(root, "module.ifo.json")
 
 
+# (field, gff type, hint) groups for the module form. Only fields the file
+# already carries are rendered - .ifo field sets vary by toolset build
+# (Mod_OnNuiEvent and Mod_UUID are newer additions), and creating one a module
+# never had is a behaviour change rather than an edit.
+MODULE_START_FIELDS = [
+    ("Mod_Entry_Area", "resref", "resref of the area players start in"),
+    ("Mod_Entry_X", "float", ""),
+    ("Mod_Entry_Y", "float", ""),
+    ("Mod_Entry_Z", "float", ""),
+    ("Mod_Entry_Dir_X", "float", "facing vector X"),
+    ("Mod_Entry_Dir_Y", "float", "facing vector Y"),
+]
+MODULE_TIME_FIELDS = [
+    ("Mod_DawnHour", "byte", "0-23"),
+    ("Mod_DuskHour", "byte", "0-23"),
+    ("Mod_MinPerHour", "byte", "real minutes per in-game hour"),
+    ("Mod_StartHour", "byte", "0-23"),
+    ("Mod_StartDay", "byte", "1-28"),
+    ("Mod_StartMonth", "byte", "1-12"),
+    ("Mod_StartYear", "dword", ""),
+]
+MODULE_RULE_FIELDS = [
+    ("Mod_XPScale", "byte", "10 = normal, 0 = no XP"),
+    ("Mod_PartyControl", "int", "0/1"),
+    ("Mod_Tag", "cexostring", "tag scripts match the module on"),
+    ("Mod_MinGameVer", "cexostring", "e.g. 1.89"),
+    ("Mod_DefaultBic", "resref", "default player character"),
+    ("Mod_StartMovie", "resref", "movie played on entry"),
+]
+MODULE_FIELD_GROUPS = [
+    ("Start location", MODULE_START_FIELDS),
+    ("Time &amp; calendar", MODULE_TIME_FIELDS),
+    ("Rules", MODULE_RULE_FIELDS),
+]
+
+
+def module_field_rows(d, fields):
+    return "".join(
+        "<tr><td>%s</td><td><input type='text' name='%s' value='%s'></td>"
+        "<td class='note'>%s</td></tr>" % (f, f, esc(getv(d, f, "")), hint)
+        for f, _t, hint in fields if f in d)
+
+
 def render_module_form(d):
+    groups = "".join(
+        "<fieldset><legend>%s</legend><table>%s</table></fieldset>" % (label, rows)
+        for label, fields in MODULE_FIELD_GROUPS
+        for rows in [module_field_rows(d, fields)] if rows)
     return (
         "<form method='post' action='%s'>"
         "<fieldset><legend>Module Info</legend><table>"
@@ -2348,24 +2479,55 @@ def render_module_form(d):
         "value='%s' size='60'></td></tr>"
         "<tr><td>Description</td><td><textarea name='Mod_Description' "
         "rows='10' cols='70'>%s</textarea></td></tr>"
-        "</table></fieldset>"
+        "</table></fieldset>%s"
+        "<p class='note'>Blank leaves a field unchanged, and fields this "
+        "module.ifo doesn't already have aren't shown or created. Hak list and "
+        "custom TLK aren't editable here - changing those needs a re-unpack to "
+        "pick up the new content.</p>"
         "<input type='submit' value='Save'></form>" %
         (purl("/module/apply"),
-         esc(loc_get(d, "Mod_Name")), esc(loc_get(d, "Mod_Description"))))
+         esc(loc_get(d, "Mod_Name")), esc(loc_get(d, "Mod_Description")), groups))
 
 
 def apply_module(root, form):
+    """Returns (touched, warnings)."""
     path = module_ifo_path(root)
     d = json_load(path)
-    touched = False
+    touched, warnings = False, []
     for name in ("Mod_Name", "Mod_Description"):
         val = form.get(name, [None])[0]
         if val is not None and val != loc_get(d, name):
             loc_set(d, name, val)
             touched = True
+
+    for _label, fields in MODULE_FIELD_GROUPS:
+        for field, gff_type, _hint in fields:
+            if field not in d:
+                continue
+            val = form.get(field, [""])[0].strip()
+            if not val:
+                continue
+            if gff_type == "float":
+                new = float(val)
+            elif gff_type in ("resref", "cexostring"):
+                new = val.lower() if gff_type == "resref" else val
+            else:
+                new = int(val)
+            if getv(d, field) != new:
+                setv(d, field, new, gff_type)
+                touched = True
+
+    # Warn rather than reject: the start area may simply not be unpacked here.
+    entry = getv(d, "Mod_Entry_Area", "")
+    if entry and not os.path.exists(are_path(root, entry)):
+        warnings.append("Start area %r has no %s.are.json in this project - "
+                        "the module will fail to load if that area really is "
+                        "missing." % (entry, entry))
+
     if touched:
         json_save(path, d)
         invalidate(path)
+    return touched, warnings
     return touched
 
 
@@ -2896,11 +3058,13 @@ class Handler(BaseHTTPRequestHandler):
         elif sub == "/creatures/settings/apply":
             self._send(apply_creature_settings(root, proj.git_root, form))
         elif sub == "/module/apply":
-            touched = apply_module(root, form)
+            touched, warnings = apply_module(root, form)
             msg = "Module info saved." if touched else "No changes."
-            self._send(page("Saved", "<p class='ok'>%s</p>"
+            warn_html = "".join("<p class='warn'>%s</p>" % esc(w)
+                                for w in warnings)
+            self._send(page("Saved", "<p class='ok'>%s</p>%s"
                             "<p><a href='%s'>Back</a></p>"
-                            % (esc(msg), purl("/module"))))
+                            % (esc(msg), warn_html, purl("/module"))))
         else:
             self._send(page("Not found", "<p>No such action.</p>"), 404)
 
