@@ -539,7 +539,7 @@ def render_scripts_form(root, resrefs):
         (f, f, esc(", ".join(sorted({r["scripts"][f] or "(none)" for r in rows}))))
         for f in AREA_SCRIPT_FIELDS)
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
-            "<form method='post' action='/areas/scripts/apply'>%s"
+            "<form method='post' action='/areas/scripts/preview'>%s"
             "<table><tr><th>Event</th><th>New script resref</th>"
             "<th>Current value(s)</th></tr>%s</table>"
             "<p class='note'>Blank = leave unchanged. Enter <b>-</b> to clear "
@@ -549,8 +549,8 @@ def render_scripts_form(root, resrefs):
     return page("Bulk edit area scripts", body)
 
 
-def apply_scripts(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_scripts(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
@@ -560,13 +560,20 @@ def apply_scripts(root, form):
             if not val:
                 continue
             new = "" if val == "-" else val.lower()[:16]
-            if getv(d, f) != new:
-                setv(d, f, new, "resref")
+            old = getv(d, f)
+            if old != new:
                 touched = True
+                if dry_run:
+                    diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, "resref")
         if touched:
-            gff_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Scripts updated", changed, resrefs)
 
 
@@ -587,7 +594,7 @@ def render_lighting_form(root, resrefs):
         (f, f, esc(getv(d0, f, "")), hint)
         for f, _t, hint in LIGHT_NUM_FIELDS)
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
-            "<form method='post' action='/areas/lighting/apply'>%s"
+            "<form method='post' action='/areas/lighting/preview'>%s"
             "<fieldset><legend>Colors (hex #rrggbb)</legend>"
             "<table><tr><th>Field</th><th>New value</th>"
             "<th>Current (%s)</th></tr>%s</table></fieldset>"
@@ -601,8 +608,8 @@ def render_lighting_form(root, resrefs):
     return page("Bulk edit lighting & fog", body)
 
 
-def apply_lighting(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_lighting(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
@@ -610,17 +617,34 @@ def apply_lighting(root, form):
         for f in LIGHT_COLOR_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, hex_to_dword(val), "dword")
+                new = hex_to_dword(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, dword_to_hex(old)
+                                     if isinstance(old, int) else old,
+                                     dword_to_hex(new)))
+                else:
+                    setv(d, f, new, "dword")
         for f, gff_type, _hint in LIGHT_NUM_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, float(val) if gff_type == "float" else int(val), gff_type)
+                new = float(val) if gff_type == "float" else int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            gff_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Lighting updated", changed, resrefs)
 
 
@@ -658,7 +682,7 @@ def render_music_form(root, resrefs):
                "resrefs. Run bin/wiki_data/_build_stock.py to enable "
                "titled dropdowns here.") + "</p>")
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
-            "<form method='post' action='/areas/music/apply'>%s"
+            "<form method='post' action='/areas/music/preview'>%s"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
             "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'></form>" %
@@ -667,8 +691,15 @@ def render_music_form(root, resrefs):
     return page("Bulk edit area music", body)
 
 
-def apply_music(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_music(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
+    titles = dict(music_options()) if dry_run else {}
+
+    def disp(f, v):
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (titles[v], v)
+        return v
+
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
@@ -676,12 +707,21 @@ def apply_music(root, form):
         for f, gff_type, _hint in MUSIC_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, int(val), gff_type)
+                new = int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, disp(f, old), disp(f, new)))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            gff_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Music updated", changed, resrefs)
 
 
@@ -695,7 +735,7 @@ def render_tags_form(root, resrefs):
             "<td><input type='text' name='ref_%s' placeholder='(keep %s)'></td></tr>" %
             (esc(res), esc(loc_get(d, "Name")), esc(res),
              esc(getv(d, "Tag", "")), esc(res), esc(res)))
-    body = ("<form method='post' action='/areas/tags/apply'>%s"
+    body = ("<form method='post' action='/areas/tags/preview'>%s"
             "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
             "<th>New ResRef (renames files!)</th></tr>%s</table>"
             "<p class='warn'>ResRef rename moves the .are/.git/.gic files on "
@@ -707,16 +747,20 @@ def render_tags_form(root, resrefs):
     return page("Edit area tags / resrefs", body)
 
 
-def apply_tags(root, form):
-    resrefs, changed, errors = form.get("res", []), [], []
+def apply_tags(root, form, dry_run=False):
+    resrefs, changed, errors, diffs = form.get("res", []), [], [], []
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
         touched = False
         new_tag = form.get("tag_" + res, [""])[0].strip()
-        if new_tag and new_tag != getv(d, "Tag"):
-            setv(d, "Tag", new_tag, "cexostring")
+        old_tag = getv(d, "Tag")
+        if new_tag and new_tag != old_tag:
             touched = True
+            if dry_run:
+                diffs.append((res, "Tag", old_tag, new_tag))
+            else:
+                setv(d, "Tag", new_tag, "cexostring")
         new_ref = form.get("ref_" + res, [""])[0].strip().lower()
         if new_ref and new_ref != res:
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
@@ -728,18 +772,25 @@ def apply_tags(root, form):
         else:
             new_ref = ""
         if new_ref:
-            setv(d, "ResRef", new_ref, "resref")
             touched = True
+            if dry_run:
+                diffs.append((res, "ResRef (renames .are/.git/.gic)",
+                             res, new_ref))
+            else:
+                setv(d, "ResRef", new_ref, "resref")
         if touched:
-            gff_save(path, d)
-            invalidate(path)
             changed.append(res)
-        if new_ref:
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
+        if new_ref and not dry_run:
             for ext in (".are", ".git", ".gic"):
                 old_p = os.path.join(root, res + ext)
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(root, new_ref + ext))
                     invalidate(old_p)
+    if dry_run:
+        return diffs, errors
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
     return result_page("Tags updated", changed, resrefs, extra)
 
@@ -750,6 +801,38 @@ def result_page(title, changed, selected, extra=""):
             (len(changed), len(selected),
              esc(", ".join(changed) or "(nothing - all values blank/same)"), extra))
     return page(title, body)
+
+
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+    """Old -> new confirmation step shared by every bulk area editor. `form`
+    is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
+    what was submitted here - the real apply_* runs are unchanged; this
+    only ever calls them with dry_run=True first."""
+    err_html = "".join("<p class='err'>%s</p>" % esc(e) for e in (errors or []))
+    if not diffs:
+        return page(title + " - preview",
+                    "%s<p class='note'>No changes - every submitted value "
+                    "is blank or already matches the current data.</p>"
+                    "<p><a href='/areas'>Back to areas</a></p>" % err_html)
+    rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+        (esc(res), esc(f), esc(old) if old not in (None, "") else "<i>(none)</i>",
+         esc(new))
+        for res, f, old, new in diffs)
+    hidden = "".join(
+        "<input type='hidden' name='%s' value='%s'>" % (esc(k), esc(v))
+        for k, vals in form.items() for v in vals)
+    body = (
+        "%s<p><b>%d</b> change(s) across <b>%d</b> of <b>%d</b> selected "
+        "area(s):</p>"
+        "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
+        "<th>New</th></tr>%s</table>"
+        "<form method='post' action='%s'>%s"
+        "<input type='submit' value='Confirm &amp; Apply'></form>"
+        "<p><a href='/areas'>Cancel - back to areas</a></p>" %
+        (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
+         rows, apply_action, hidden))
+    return page(title + " - preview", body)
 
 
 # --- Creature / BIC logic ---------------------------------------------------
@@ -1400,6 +1483,30 @@ class Handler(BaseHTTPRequestHandler):
                           "music": render_music_form,
                           "tags": render_tags_form}[action]
                 self._send(render(self.root, resrefs))
+            elif path == "/areas/scripts/preview":
+                resrefs = form.get("res", [])
+                diffs = apply_scripts(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Bulk edit area scripts", diffs, resrefs, form,
+                    "/areas/scripts/apply"))
+            elif path == "/areas/lighting/preview":
+                resrefs = form.get("res", [])
+                diffs = apply_lighting(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Bulk edit lighting & fog", diffs, resrefs, form,
+                    "/areas/lighting/apply"))
+            elif path == "/areas/music/preview":
+                resrefs = form.get("res", [])
+                diffs = apply_music(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Bulk edit area music", diffs, resrefs, form,
+                    "/areas/music/apply"))
+            elif path == "/areas/tags/preview":
+                resrefs = form.get("res", [])
+                diffs, errors = apply_tags(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Edit area tags / resrefs", diffs, resrefs, form,
+                    "/areas/tags/apply", errors))
             elif path == "/areas/scripts/apply":
                 self._send(apply_scripts(self.root, form))
             elif path == "/areas/lighting/apply":

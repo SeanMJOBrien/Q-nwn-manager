@@ -786,13 +786,13 @@ def render_scripts_form(root, resrefs):
             "a script. Max 16 chars, no extension.</p>"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/preview"),
              hidden_resrefs(resrefs), inputs, purl("/areas")))
     return page("Bulk edit area scripts", body)
 
 
-def apply_scripts(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_scripts(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -802,13 +802,20 @@ def apply_scripts(root, form):
             if not val:
                 continue
             new = "" if val == "-" else val.lower()[:16]
-            if getv(d, f) != new:
-                setv(d, f, new, "resref")
+            old = getv(d, f)
+            if old != new:
                 touched = True
+                if dry_run:
+                    diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, "resref")
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Scripts updated", changed, resrefs)
 
 
@@ -839,14 +846,14 @@ def render_lighting_form(root, resrefs):
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/preview"),
              hidden_resrefs(resrefs),
              esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows, purl("/areas")))
     return page("Bulk edit lighting & fog", body)
 
 
-def apply_lighting(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_lighting(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -854,17 +861,34 @@ def apply_lighting(root, form):
         for f in LIGHT_COLOR_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, hex_to_dword(val), "dword")
+                new = hex_to_dword(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, dword_to_hex(old)
+                                     if isinstance(old, int) else old,
+                                     dword_to_hex(new)))
+                else:
+                    setv(d, f, new, "dword")
         for f, gff_type, _hint in LIGHT_NUM_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, float(val) if gff_type == "float" else int(val), gff_type)
+                new = float(val) if gff_type == "float" else int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Lighting updated", changed, resrefs)
 
 
@@ -907,13 +931,20 @@ def render_music_form(root, resrefs):
             "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/preview"),
              hidden_resrefs(resrefs), esc(resrefs[0]), rows, note, purl("/areas")))
     return page("Bulk edit area music", body)
 
 
-def apply_music(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_music(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
+    titles = dict(music_options()) if dry_run else {}
+
+    def disp(f, v):
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (titles[v], v)
+        return v
+
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -921,12 +952,21 @@ def apply_music(root, form):
         for f, gff_type, _hint in MUSIC_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, int(val), gff_type)
+                new = int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, disp(f, old), disp(f, new)))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Music updated", changed, resrefs)
 
 
@@ -965,25 +1005,33 @@ def render_tags_form(root, resrefs):
             "the old resref - search those separately.</p>"
             "<input type='submit' value='Apply'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows),
+            (purl("/areas/tags/preview"), hidden_resrefs(resrefs), "".join(rows),
              purl("/areas")))
     return page("Edit area names / tags / resrefs", body)
 
 
-def apply_tags(root, git_root, gic_root, form):
-    resrefs, changed, errors = form.get("res", []), [], []
+def apply_tags(root, git_root, gic_root, form, dry_run=False):
+    resrefs, changed, errors, diffs = form.get("res", []), [], [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
         touched = False
         new_name = form.get("name_" + res, [""])[0].strip()
-        if new_name and new_name != loc_get(d, "Name"):
-            loc_set(d, "Name", new_name)
+        old_name = loc_get(d, "Name")
+        if new_name and new_name != old_name:
             touched = True
+            if dry_run:
+                diffs.append((res, "Name", old_name, new_name))
+            else:
+                loc_set(d, "Name", new_name)
         new_tag = form.get("tag_" + res, [""])[0].strip()
-        if new_tag and new_tag != getv(d, "Tag"):
-            setv(d, "Tag", new_tag, "cexostring")
+        old_tag = getv(d, "Tag")
+        if new_tag and new_tag != old_tag:
             touched = True
+            if dry_run:
+                diffs.append((res, "Tag", old_tag, new_tag))
+            else:
+                setv(d, "Tag", new_tag, "cexostring")
         # Checkboxes only submit when ticked, so a hidden marker distinguishes
         # "this form had no flag boxes" (leave Flags alone) from "every box was
         # deliberately unticked" (clear all three) - the same technique the
@@ -996,8 +1044,12 @@ def apply_tags(root, git_root, gic_root, form):
                     bits |= bit
             new_flags = (old_flags & ~AREA_FLAG_KNOWN) | bits
             if new_flags != old_flags:
-                setv(d, "Flags", new_flags, "dword")
                 touched = True
+                if dry_run:
+                    diffs.append((res, "Flags", area_type_label(old_flags),
+                                 area_type_label(new_flags)))
+                else:
+                    setv(d, "Flags", new_flags, "dword")
         new_ref = form.get("ref_" + res, [""])[0].strip().lower()
         if new_ref and new_ref != res:
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
@@ -1009,19 +1061,26 @@ def apply_tags(root, git_root, gic_root, form):
         else:
             new_ref = ""
         if new_ref:
-            setv(d, "ResRef", new_ref, "resref")
             touched = True
+            if dry_run:
+                diffs.append((res, "ResRef (renames .are/.git/.gic.json)",
+                             res, new_ref))
+            else:
+                setv(d, "ResRef", new_ref, "resref")
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
-        if new_ref:
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+        if new_ref and not dry_run:
             for base, ext in ((root, ".are.json"), (git_root, ".git.json"),
                                (gic_root, ".gic.json")):
                 old_p = os.path.join(base, res + ext)
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(base, new_ref + ext))
                     invalidate(old_p)
+    if dry_run:
+        return diffs, errors
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
     return result_page("Names / tags updated", changed, resrefs, extra)
 
@@ -1033,6 +1092,39 @@ def result_page(title, changed, selected, extra=""):
              esc(", ".join(changed) or "(nothing - all values blank/same)"),
              extra, purl("/areas")))
     return page(title, body)
+
+
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+    """Old -> new confirmation step shared by every bulk area editor. `form`
+    is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
+    what was submitted here - the real apply_* runs are unchanged; this
+    only ever calls them with dry_run=True first."""
+    err_html = "".join("<p class='err'>%s</p>" % esc(e) for e in (errors or []))
+    if not diffs:
+        return page(title + " - preview",
+                    "%s<p class='note'>No changes - every submitted value "
+                    "is blank or already matches the current data.</p>"
+                    "<p><a href='%s'>Back to areas</a></p>" %
+                    (err_html, purl("/areas")))
+    rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+        (esc(res), esc(f), esc(old) if old not in (None, "") else "<i>(none)</i>",
+         esc(new))
+        for res, f, old, new in diffs)
+    hidden = "".join(
+        "<input type='hidden' name='%s' value='%s'>" % (esc(k), esc(v))
+        for k, vals in form.items() for v in vals)
+    body = (
+        "%s<p><b>%d</b> change(s) across <b>%d</b> of <b>%d</b> selected "
+        "area(s):</p>"
+        "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
+        "<th>New</th></tr>%s</table>"
+        "<form method='post' action='%s'>%s"
+        "<input type='submit' value='Confirm &amp; Apply'></form>"
+        "<p><a href='%s'>Cancel - back to areas</a></p>" %
+        (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
+         rows, apply_action, hidden, purl("/areas")))
+    return page(title + " - preview", body)
 
 
 # --- Remove placed objects (creatures/placeables/loose items + their -------
@@ -3202,6 +3294,31 @@ class Handler(BaseHTTPRequestHandler):
                       "music": render_music_form,
                       "tags": render_tags_form}[action]
             self._send(render(root, resrefs))
+        elif sub == "/areas/scripts/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_scripts(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit area scripts", diffs, resrefs, form,
+                purl("/areas/scripts/apply")))
+        elif sub == "/areas/lighting/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_lighting(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit lighting & fog", diffs, resrefs, form,
+                purl("/areas/lighting/apply")))
+        elif sub == "/areas/music/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_music(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit area music", diffs, resrefs, form,
+                purl("/areas/music/apply")))
+        elif sub == "/areas/tags/preview":
+            resrefs = form.get("res", [])
+            diffs, errors = apply_tags(root, proj.git_root, proj.gic_root,
+                                       form, dry_run=True)
+            self._send(render_diff_preview(
+                "Edit area names / tags / resrefs", diffs, resrefs, form,
+                purl("/areas/tags/apply"), errors))
         elif sub == "/areas/scripts/apply":
             self._send(apply_scripts(root, form))
         elif sub == "/areas/lighting/apply":

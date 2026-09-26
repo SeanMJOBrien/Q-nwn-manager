@@ -54,7 +54,7 @@ module-wide).
 
 **UI flow:** form shows the four events with each event's **current distinct
 values** across the selection (so you can see divergence before overwriting).
-POST `/areas/scripts/apply`.
+POST `/areas/scripts/preview` -> confirm -> `/areas/scripts/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched:** the four `resref`-typed event fields in each `.are`.
 
@@ -78,7 +78,7 @@ all crypts, add fog to all swamps, switch areas to static night, etc.
 
 **UI flow:** form prefilled with the **first selected area's** current values
 (as reference; multi-area edits apply uniformly). Two fieldsets: colors and
-numerics. POST `/areas/lighting/apply`.
+numerics. POST `/areas/lighting/preview` -> confirm -> `/areas/lighting/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched (.are):**
 - Colors (dword, stored **0xBBGGRR** BGR — entered as `#rrggbb` hex and
@@ -113,7 +113,7 @@ visibly ignore sun/moon settings (engine behavior, not app).
 of areas without the toolset's Music properties tab.
 
 **UI flow:** form prefilled with the **first selected area's** current values
-(as reference; multi-area edits apply uniformly). POST `/areas/music/apply`.
+(as reference; multi-area edits apply uniformly). POST `/areas/music/preview` -> confirm -> `/areas/music/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched (.are):** `MusicDay`/`MusicNight`/`MusicBattle` (int,
 ambientmusic.2da row index — 0 = none), `MusicDelay` (byte, 0 = start
@@ -163,7 +163,7 @@ sits in that directory.
 needed, its file identity (ResRef).
 
 **UI flow:** per-area editable Tag input (prefilled) + optional "new resref"
-input (placeholder = keep). POST `/areas/tags/apply`.
+input (placeholder = keep). POST `/areas/tags/preview` -> confirm -> `/areas/tags/apply` (see "Bulk-edit confirmation step" below).
 
 **Behavior:**
 - Tag: written to `.are` `Tag` field when changed.
@@ -177,6 +177,48 @@ target tags, waypoint tags of the form `<TEAM>_VAULT` embed old tags, and
 `module.ifo`'s `Mod_Entry_Area` may point at the old resref. Grep the module
 after any rename. Per-area validation errors are reported inline and skip
 only the offending rename, not the whole batch.
+
+---
+
+## Bulk-edit confirmation step (scripts / lighting / music / tags)
+
+**Purpose:** catch fat-fingered bulk edits — a bad hex color, an off-by-one
+music row, a resref typo — across dozens of areas before anything is
+written, instead of only after the fact via the `.bak` recovery path.
+
+**Mechanism:** each of the four area bulk-editors above gained a
+`dry_run=False` parameter on its `apply_*` function. With `dry_run=True`,
+every code path that would call `gff_save`/`json_save` or (tags only)
+`os.replace` a renamed file is skipped **entirely** — no write of any kind
+reaches disk — and the function instead returns `(resref, field, old, new)`
+tuples for every field that would actually change (blank/unchanged
+submissions are never included, same semantics as a real apply). The form
+`action`s now point at a `.../preview` route that calls `apply_X(...,
+dry_run=True)` and renders the result through the shared
+`render_diff_preview()`: an old → new table, a "Confirm & Apply" button
+that **resubmits every original form field verbatim** as hidden inputs to
+the unchanged `.../apply` route, and a cancel link back to `/areas`. If
+nothing would change, the preview says so instead of showing an empty
+table. `apply_tags`' validation errors (bad resref, name collision) surface
+on the preview page too, not just after a real apply.
+
+**Why not a generic wrapper:** an earlier design monkey-patched
+`gff_save`/`json_save` to a no-op around an unmodified `apply_*` call,
+diffing the mutated in-memory dict before/after — appealingly generic, but
+wrong for tags: `apply_tags`' file-rename (`os.replace`) runs unconditionally
+whenever a new resref is set, **regardless of whether `gff_save` was ever
+called** — so that wrapper would rename files on disk during a "preview".
+Threading `dry_run` through each `apply_*` explicitly, so every write *and*
+every `os.replace` is individually gated, was the only version that's
+actually safe for a rename-capable feature — confirmed by hand: a
+`ref_<res>=newname` preview POST leaves the original `.are`/`.are.json`
+file present and unrenamed on disk.
+
+**Verified:** preview leaves the file byte-identical (checked before/after
+with `nwn_gff -k json` on a real `.are`); confirming re-submits the exact
+preview values and the file updates; an invalid resref's error message
+appears on the preview page; a no-op submission (blank or already-current
+values) shows "No changes" instead of an empty table.
 
 ---
 
