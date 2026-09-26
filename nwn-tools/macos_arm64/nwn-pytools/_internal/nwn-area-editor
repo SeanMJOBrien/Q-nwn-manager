@@ -212,6 +212,7 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
 .cancel-link:hover{background:#2a2b31}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:#333}
 .sort-arrow{font-size:.8em}
+tr.qnm-linked{background:#3a2f1a}
 """
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
@@ -239,6 +240,7 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
  border-radius:3px;text-decoration:none}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:Canvas}
 .sort-arrow{font-size:.8em}
+tr.qnm-linked{background:rgba(184,134,11,.15)}
 """
 
 
@@ -1127,17 +1129,35 @@ def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
     return page(title + " - preview", body)
 
 
-# --- Remove placed objects (creatures/placeables/loose items + their -------
-#     nested inventory) from selected areas' .git.json -----------------------
+# --- Remove placed objects (creatures/placeables/loose items/doors/triggers/
+#     waypoints/sounds/stores/encounters + their nested inventory) from
+#     selected areas' .git.json ------------------------------------------
 # Top-level placed-object list fields, keyed by a short URL-safe category
 # name. Field name spacing is genuinely inconsistent in GFF-JSON ("Creature
-# List" / "Placeable List" are spaced, bare "List" holds loose ground items)
-# - that's the real shape, not a typo to fix.
+# List" / "Placeable List" are spaced, "TriggerList"/"WaypointList"/
+# "SoundList"/"StoreList" aren't, bare "List" holds loose ground items) -
+# verified against real .git files, not a typo to fix.
 OBJECT_LIST_FIELDS = {
     "creature": "Creature List",
     "placeable": "Placeable List",
     "item": "List",
+    "door": "Door List",
+    "trigger": "TriggerList",
+    "waypoint": "WaypointList",
+    "sound": "SoundList",
+    "store": "StoreList",
+    "encounter": "Encounter List",
 }
+
+# Categories whose Tag can be a door/trigger transition target (LinkedTo) or
+# a script's GetWaypointByTag/GetNearestObjectByTag lookup - removing one can
+# silently break a transition or script hook elsewhere in the module. This is
+# exactly the "higher blast radius" TODO.md deferred these categories over;
+# surfaced as an inline per-row warning (same warn-don't-block pattern the
+# tags-rename feature already uses for the identical LinkedTo/tag risk), not
+# a removal block - the app has no way to verify "elsewhere" is actually
+# clear, only that this row itself is a live transition endpoint.
+LINKED_CATEGORIES = {"door", "trigger", "waypoint"}
 
 # Nested inventory fields per top-level category. A loose ground item can
 # carry its own ItemList too (bag-of-holding-style items) - same field/shape
@@ -1158,12 +1178,25 @@ def _obj_position(entry):
 def _obj_name(category, entry):
     """Display name for a placed instance - .git entries carry the same
     localized-name fields as their blueprint (FirstName/LastName for
-    creatures, LocalizedName/LocName for placeables and items)."""
+    creatures, LocalizedName/LocName for everything else)."""
     if category == "creature":
         first = loc_get(entry, "FirstName")
         last = loc_get(entry, "LastName")
         return ("%s %s" % (first, last)).strip()
     return loc_get(entry, "LocalizedName") or loc_get(entry, "LocName") or ""
+
+
+def _obj_blueprint(entry):
+    """Blueprint resref - TemplateResRef for every category except placed
+    stores, which use a bare ResRef field instead (verified against a real
+    StoreList entry)."""
+    return getv(entry, "TemplateResRef", getv(entry, "ResRef", ""))
+
+
+def _obj_linked_to(category, entry):
+    """Non-empty only for a door/trigger/waypoint that's a live transition
+    target or script-lookup anchor - see LINKED_CATEGORIES."""
+    return getv(entry, "LinkedTo", "") if category in LINKED_CATEGORIES else ""
 
 
 def _inventory_rows_html(res, category, idx, entry):
@@ -1233,29 +1266,35 @@ def render_remove_objects_form(root, git_root, resrefs):
             for idx, entry in enumerate(entries):
                 tag = getv(entry, "Tag", "")
                 name = _obj_name(category, entry)
-                blueprint = getv(entry, "TemplateResRef", "")
+                blueprint = _obj_blueprint(entry)
                 x, y = _obj_position(entry)
+                linked = _obj_linked_to(category, entry)
                 cb_value = "|".join((res, category, str(idx)))
                 pos_sort = "%012.3f,%012.3f" % (x, y)
+                row_class, linked_html = "", ""
+                if linked:
+                    row_class = " class='qnm-linked'"
+                    linked_html = "<span class='warn'>-&gt; %s</span>" % esc(linked)
                 area_rows.append(
-                    "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                    "<tr%s><td><input type='checkbox' name='del' value='%s'></td>"
                     "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                    "<td data-sort='%s'>%.1f, %.1f</td></tr>" %
-                    (esc(cb_value), esc(category), esc(name), esc(tag),
-                     esc(blueprint), esc(pos_sort), x, y))
+                    "<td data-sort='%s'>%.1f, %.1f</td><td>%s</td></tr>" %
+                    (row_class, esc(cb_value), esc(category), esc(name), esc(tag),
+                     esc(blueprint), esc(pos_sort), x, y, linked_html))
                 area_rows.append(_inventory_rows_html(res, category, idx, entry))
         area_rows = [r for r in area_rows if r]
         if not area_rows:
             continue
         sections.append(
-            "<h3>%s</h3><table class='remove-objects'><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
+            "<h3>%s</h3><table class='remove-objects'><tr><th></th>%s%s%s%s%s%s</tr>%s</table>" %
             (esc(res), sth("Type"), sth("Name"), sth("Tag"), sth("Blueprint"),
-             sth("Position"), "".join(area_rows)))
+             sth("Position"), sth("Linked to"), "".join(area_rows)))
 
     if not sections:
         return page("Remove placed objects",
-                    "<p class='note'>No placeables, creatures, or loose "
-                    "items found in the selected area(s).</p>"
+                    "<p class='note'>No placeables, creatures, loose items, "
+                    "doors, triggers, waypoints, sounds, stores, or "
+                    "encounters found in the selected area(s).</p>"
                     "<p><a href='%s'>Back</a></p>" % purl("/areas"))
 
     body = ("<p><input type='search' placeholder='Filter by name/tag/blueprint...' "
@@ -1264,6 +1303,12 @@ def render_remove_objects_form(root, git_root, resrefs):
             "<p class='note'>Tick objects to REMOVE, then Apply. First edit "
             "of each area keeps a one-time .git.json.bak backup, but this is "
             "otherwise permanent - review before applying.</p>"
+            "<p class='warn'>Rows with a <b>Linked to</b> value are a door/"
+            "trigger transition endpoint or a waypoint another object may "
+            "target by tag - removing one can silently break that link "
+            "elsewhere in the module. The app does not chase or verify "
+            "those references (same non-goal as the tags-rename feature) -"
+            " review the target before removing.</p>"
             "<input type='submit' value='Remove selected'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
