@@ -48,9 +48,28 @@ Editing gaps neither project covers, left where the relevant machinery lives:
 Deliberately out of scope for the first version - see the "Explicitly out of
 scope" section this shipped against for the full reasoning.
 
-- Doors/Triggers/Waypoints/Sounds/Stores/Encounters aren't removable yet -
-  only Placeable/Creature/loose-item lists are. Higher blast radius (broken
-  transitions/script hooks) if done carelessly.
+- ~~Doors/Triggers/Waypoints/Sounds/Stores/Encounters aren't removable yet~~ -
+  added to `OBJECT_LIST_FIELDS` (`Door List`/`TriggerList`/`WaypointList`/
+  `SoundList`/`StoreList`/`Encounter List` - field-name spacing verified
+  against real `.git` files, not guessed). `apply_remove_objects` needed no
+  changes at all since it already dispatched generically over
+  `OBJECT_LIST_FIELDS`. The blast-radius concern is real and stays
+  unmitigated for the *other* areas a link points at - the app can't verify
+  those - but a door/trigger/waypoint row whose `LinkedTo` is set now renders
+  with an inline warning (amber row highlight + `-> target` in a new "Linked
+  to" column) so at least *this* row's risk is visible before removal, same
+  warn-don't-block precedent as the tags-rename feature. `_obj_blueprint()`
+  also had to special-case placed stores, which use a bare `ResRef` field
+  instead of every other category's `TemplateResRef`.
+- Still not covered: a store's own for-sale inventory (its `StoreList`
+  sub-field - yes, same name as the top-level placed-stores list, a second
+  genuine GFF-JSON collision) and an encounter's `CreatureList`/
+  `SpawnPointList` aren't drillable for nested removal the way a
+  placeable/creature/item's carried `ItemList` is - `_inventory_rows_html`
+  assumes item-shaped entries (`EquippedRes`/`InventoryRes`, `item_name()`),
+  which doesn't fit a creature spawn-table entry or a for-sale blueprint
+  without a second nested-row renderer. Only the top-level instances are
+  removable for these two categories today.
 - ~~No filtering/search box within the remove-objects page itself~~ - added
   a client-side live filter (`qnmFilterObjects`/`FILTER_SCRIPT`) that hides
   non-matching rows (grouped with their nested inventory rows) without a
