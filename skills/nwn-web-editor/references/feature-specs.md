@@ -129,18 +129,31 @@ tracks that carry no strref (Daggerford/HotU stingers). Same
 `_load_stock_json`/graceful-fallback contract as `class_name`/`feat_name`/
 `skill_name`: if `music.json` is missing, the fields fall back to plain
 number inputs with the old "look it up yourself" hint — never a crash.
-Only covers ambientmusic.2da rows the base game (or whatever install
-`_build_stock.py` ran against) actually has; a HAK-added custom track past
-row 137 shows as a bare number until `music.json` is regenerated against
-that install/module.
+
+**Project 2da/custom-TLK overlay:** `--twoda-dir DIR` (a project's own
+merged `ambientmusic.2da`/`appearance.2da`/`feat.2da`, e.g. extracted from
+its HAKs) and `--custom-tlk FILE` (its custom TLK) close the gap above -
+`load_named_2da_options()` live-parses `--twoda-dir`'s copy of the table,
+resolving any row whose Description/Name strref is `>= 0x01000000`
+(`CUSTOM_TLK_OFFSET`) via `--custom-tlk`, keeping the pre-baked stock name
+for every row it already knows, and title-casing the Resource/Label cell
+as a last resort for a row with no strref at all. Both flags are optional
+and pass straight through `nwn-manager console`/`edit-areas`'s existing
+"extra args forward to the tool" contract - no `nwn-manager` changes were
+needed. `read_tlk()`/`parse_2da()` are small stdlib-only re-implementations
+of `bin/wiki_data/_2da_lib.py`'s logic (kept duplicated rather than
+imported, matching this project's existing between-editor duplication
+convention - see `TODO.md`), so this works even in the frozen
+`nwn-pytools` binary with no `nwn_tlk`/`nwn_erf` on PATH.
 
 **Blank semantics:** blank ("(leave unchanged)") = keep per-area current
 value on every selected area.
 
-**Limitations:** no custom-TLK resolution for module-added ambientmusic.2da
-rows (module haks that append rows with strrefs into their own custom TLK,
-not dialog.tlk) — `_build_stock.py` only reads the stock table off a base
-NWN install; `resolve_name`'s custom-TLK dict is always empty here.
+**Limitations:** `--twoda-dir`'s tables must already be the project's
+*merged* result (base + HAK overrides stacked, e.g. via `nwn_erf -x` on
+each HAK plus manual override resolution) - the app doesn't compute HAK
+layering itself, it only parses whatever single `ambientmusic.2da` file
+sits in that directory.
 
 ---
 
@@ -238,9 +251,12 @@ XP/gold/age), plus:
 **Limitations:** both lookups gracefully degrade to the old raw-ID inputs
 if `appearance.json`/`feat.json` are missing (same `_load_stock_json`
 empty-dict fallback as everywhere else) — never a crash. Only stock rows
-are named; a HAK-added feat/appearance past the stock table's coverage
-needs its raw ID via the comma-separated feat box or the
-`Appearance_Type_raw` override. Skills, class list,
+are named unless `--twoda-dir`/`--custom-tlk` are given (see §4's "Project
+2da/custom-TLK overlay" — the same `load_named_2da_options()` backs
+`appearance_options()`/`feat_options()` too); without them, a HAK-added
+feat/appearance past the stock table's coverage needs its raw ID via the
+comma-separated feat box or the `Appearance_Type_raw` override.
+Skills, class list,
 spell lists, and inventory are view-adjacent but not editable here — use
 the `nwn-character-editor` skill's Python recipes for those (positional
 SkillList and slot-bitmask Equip_ItemList semantics make them poor fits

@@ -41,6 +41,7 @@ import mimetypes
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1819,24 +1820,145 @@ def skill_name(skill_id):
     return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
 
 
+# --- Project-specific 2DA/custom-TLK overlay ---------------------------
+# --twoda-dir/--custom-tlk (set in main()) let a project's own merged 2das
+# (extracted from its HAKs) and custom TLK resolve HAK-added or
+# HAK-overridden rows the stock bin/wiki_data/*.json tables don't cover -
+# the gap _build_stock.py's docstring already flagged. Both are optional;
+# every *_options() below still works off the stock JSON alone otherwise.
+TWODA_DIR = None
+CUSTOM_TLK = {}
+CUSTOM_TLK_OFFSET = 0x01000000  # bit 24 set -> module's own custom TLK
+
+
+def read_tlk(path):
+    """Parse a .tlk (TLK V3.0) file into {strref: text}. Only entries with
+    the TEXT_PRESENT flag set are included."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[0:4] != b"TLK ":
+        raise ValueError("not a TLK file: %s" % path)
+    count, entries_off = struct.unpack_from("<II", data, 12)
+    out = {}
+    for i in range(count):
+        off = 20 + i * 40
+        flags, = struct.unpack_from("<I", data, off)
+        if not (flags & 0x1):
+            continue
+        str_off, str_size = struct.unpack_from("<II", data, off + 28)
+        start = entries_off + str_off
+        out[i] = data[start:start + str_size].decode("cp1252", "replace")
+    return out
+
+
+def parse_2da(path):
+    """Parse a 2DA V2.0 file. Returns (headers, rows); row[0] is the row
+    index as text, subsequent cells align 1:1 with headers."""
+    with open(path, encoding="cp1252", errors="replace") as fh:
+        lines = fh.read().splitlines()
+    i = 0
+    while i < len(lines) and not lines[i].strip().startswith("2DA"):
+        i += 1
+    i += 1
+    while i < len(lines) and (not lines[i].strip()
+                              or lines[i].lstrip().upper().startswith("DEFAULT")):
+        i += 1
+    if i >= len(lines):
+        return [], []
+
+    def split(line):
+        out, j, n = [], 0, len(line)
+        while j < n:
+            while j < n and line[j] in " \t":
+                j += 1
+            if j >= n:
+                break
+            if line[j] == '"':
+                k = j + 1
+                while k < n and line[k] != '"':
+                    k += 1
+                out.append(line[j + 1:k])
+                j = k + 1
+            else:
+                k = j
+                while k < n and line[k] not in " \t":
+                    k += 1
+                tok = line[j:k]
+                out.append("" if tok == "****" else tok)
+                j = k
+        return out
+
+    headers = split(lines[i])
+    rows = [c for ln in lines[i + 1:] if ln.strip() for c in [split(ln)] if c]
+    return headers, rows
+
+
+def col_index(headers, name):
+    lower = [h.lower() for h in headers]
+    return lower.index(name.lower()) + 1 if name.lower() in lower else None
+
+
+def load_named_2da_options(json_name, twoda_name, name_col, label_col):
+    """(id, name) pairs for a 2da-backed picker (music/appearance/feat).
+
+    Base names come from the pre-baked bin/wiki_data/<json_name>.json
+    (built off a stock install's dialog.tlk). When --twoda-dir/--custom-tlk
+    are given, also live-parses the project's own <twoda_name> so a
+    HAK-added row - or a HAK-overridden stock row whose Name/Description
+    cell now points into the module's own custom TLK (>= 0x01000000) -
+    resolves too; a row with no strref at all falls back to a title-cased
+    label/resource cell."""
+    stock = {int(k): v for k, v in _load_stock_json(json_name).items()}
+    if not TWODA_DIR:
+        return sorted(stock.items())
+    path = os.path.join(TWODA_DIR, twoda_name)
+    if not os.path.isfile(path):
+        return sorted(stock.items())
+    headers, rows = parse_2da(path)
+    n_idx = col_index(headers, name_col)
+    l_idx = col_index(headers, label_col)
+    options = dict(stock)
+    for row in rows:
+        if not row:
+            continue
+        try:
+            ridx = int(row[0])
+        except ValueError:
+            continue
+        name_cell = row[n_idx] if n_idx is not None and n_idx < len(row) else ""
+        label_cell = row[l_idx] if l_idx is not None and l_idx < len(row) else ""
+        try:
+            ref = int(name_cell)
+        except (TypeError, ValueError):
+            ref = -1
+        if ref >= CUSTOM_TLK_OFFSET:
+            custom_name = CUSTOM_TLK.get(ref - CUSTOM_TLK_OFFSET, "")
+            if custom_name:
+                options[ridx] = custom_name
+                continue
+        if ridx not in options:
+            lbl = label_cell.replace("_", " ").strip()
+            options[ridx] = (lbl[:1].upper() + lbl[1:]) if lbl else str(ridx)
+    return sorted(options.items())
+
+
 def music_options():
     """ambientmusic.2da rows as (id, title) pairs, sorted by id - what the
     toolset's Music Day/Night/Battle picker shows in place of the raw
     resref/row number."""
-    data = _load_stock_json("music")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("music", "ambientmusic.2da",
+                                  "Description", "Resource")
 
 
 def appearance_options():
     """appearance.2da rows as (id, name) pairs, sorted by id."""
-    data = _load_stock_json("appearance")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("appearance", "appearance.2da",
+                                  "STRING_REF", "LABEL")
 
 
 def feat_options():
     """feat.2da rows as (id, name) pairs, sorted by id."""
-    data = _load_stock_json("feat")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("feat", "feat.2da", "FEAT", "LABEL")
 
 
 def utc_path(root, res):
@@ -3387,7 +3509,23 @@ def main():
     ap.add_argument("--landing-dir", default=None,
                     help="where start.html lives and dropped .mod files are "
                          "scanned (default: the repo root above bin/)")
+    ap.add_argument("--twoda-dir", default=None, metavar="DIR",
+                    help="directory of this project's own merged 2das "
+                         "(ambientmusic.2da/appearance.2da/feat.2da, e.g. "
+                         "extracted from its HAKs) - resolves HAK-added or "
+                         "HAK-overridden rows the stock tables don't cover")
+    ap.add_argument("--custom-tlk", default=None, metavar="FILE",
+                    help="this project's custom .tlk, for strrefs >= "
+                         "0x01000000 in --twoda-dir's tables (see "
+                         "module.ifo's Mod_CustomTlk)")
     args = ap.parse_args()
+
+    if args.twoda_dir:
+        global TWODA_DIR
+        TWODA_DIR = os.path.abspath(args.twoda_dir)
+    if args.custom_tlk:
+        global CUSTOM_TLK
+        CUSTOM_TLK = read_tlk(args.custom_tlk)
 
     global LANDING_DIR
     NWN_MANAGER = _find_nwn_manager(args.nwn_manager)
