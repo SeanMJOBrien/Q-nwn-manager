@@ -41,6 +41,7 @@ import mimetypes
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -211,6 +212,7 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
 .cancel-link:hover{background:#2a2b31}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:#333}
 .sort-arrow{font-size:.8em}
+tr.qnm-linked{background:#3a2f1a}
 """
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
@@ -238,6 +240,7 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
  border-radius:3px;text-decoration:none}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:Canvas}
 .sort-arrow{font-size:.8em}
+tr.qnm-linked{background:rgba(184,134,11,.15)}
 """
 
 
@@ -785,13 +788,13 @@ def render_scripts_form(root, resrefs):
             "a script. Max 16 chars, no extension.</p>"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/scripts/preview"),
              hidden_resrefs(resrefs), inputs, purl("/areas")))
     return page("Bulk edit area scripts", body)
 
 
-def apply_scripts(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_scripts(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -801,13 +804,20 @@ def apply_scripts(root, form):
             if not val:
                 continue
             new = "" if val == "-" else val.lower()[:16]
-            if getv(d, f) != new:
-                setv(d, f, new, "resref")
+            old = getv(d, f)
+            if old != new:
                 touched = True
+                if dry_run:
+                    diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, "resref")
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Scripts updated", changed, resrefs)
 
 
@@ -838,14 +848,14 @@ def render_lighting_form(root, resrefs):
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/lighting/preview"),
              hidden_resrefs(resrefs),
              esc(resrefs[0]), color_rows, esc(resrefs[0]), num_rows, purl("/areas")))
     return page("Bulk edit lighting & fog", body)
 
 
-def apply_lighting(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_lighting(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -853,17 +863,34 @@ def apply_lighting(root, form):
         for f in LIGHT_COLOR_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, hex_to_dword(val), "dword")
+                new = hex_to_dword(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, dword_to_hex(old)
+                                     if isinstance(old, int) else old,
+                                     dword_to_hex(new)))
+                else:
+                    setv(d, f, new, "dword")
         for f, gff_type, _hint in LIGHT_NUM_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, float(val) if gff_type == "float" else int(val), gff_type)
+                new = float(val) if gff_type == "float" else int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, old, new))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Lighting updated", changed, resrefs)
 
 
@@ -906,13 +933,20 @@ def render_music_form(root, resrefs):
             "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
+            (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/preview"),
              hidden_resrefs(resrefs), esc(resrefs[0]), rows, note, purl("/areas")))
     return page("Bulk edit area music", body)
 
 
-def apply_music(root, form):
-    resrefs, changed = form.get("res", []), []
+def apply_music(root, form, dry_run=False):
+    resrefs, changed, diffs = form.get("res", []), [], []
+    titles = dict(music_options()) if dry_run else {}
+
+    def disp(f, v):
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (titles[v], v)
+        return v
+
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -920,12 +954,21 @@ def apply_music(root, form):
         for f, gff_type, _hint in MUSIC_FIELDS:
             val = form.get(f, [""])[0].strip()
             if val:
-                setv(d, f, int(val), gff_type)
+                new = int(val)
+                old = getv(d, f)
                 touched = True
+                if dry_run:
+                    if old != new:
+                        diffs.append((res, f, disp(f, old), disp(f, new)))
+                else:
+                    setv(d, f, new, gff_type)
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs
     return result_page("Music updated", changed, resrefs)
 
 
@@ -964,25 +1007,33 @@ def render_tags_form(root, resrefs):
             "the old resref - search those separately.</p>"
             "<input type='submit' value='Apply'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
-            (purl("/areas/tags/apply"), hidden_resrefs(resrefs), "".join(rows),
+            (purl("/areas/tags/preview"), hidden_resrefs(resrefs), "".join(rows),
              purl("/areas")))
     return page("Edit area names / tags / resrefs", body)
 
 
-def apply_tags(root, git_root, gic_root, form):
-    resrefs, changed, errors = form.get("res", []), [], []
+def apply_tags(root, git_root, gic_root, form, dry_run=False):
+    resrefs, changed, errors, diffs = form.get("res", []), [], [], []
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
         touched = False
         new_name = form.get("name_" + res, [""])[0].strip()
-        if new_name and new_name != loc_get(d, "Name"):
-            loc_set(d, "Name", new_name)
+        old_name = loc_get(d, "Name")
+        if new_name and new_name != old_name:
             touched = True
+            if dry_run:
+                diffs.append((res, "Name", old_name, new_name))
+            else:
+                loc_set(d, "Name", new_name)
         new_tag = form.get("tag_" + res, [""])[0].strip()
-        if new_tag and new_tag != getv(d, "Tag"):
-            setv(d, "Tag", new_tag, "cexostring")
+        old_tag = getv(d, "Tag")
+        if new_tag and new_tag != old_tag:
             touched = True
+            if dry_run:
+                diffs.append((res, "Tag", old_tag, new_tag))
+            else:
+                setv(d, "Tag", new_tag, "cexostring")
         # Checkboxes only submit when ticked, so a hidden marker distinguishes
         # "this form had no flag boxes" (leave Flags alone) from "every box was
         # deliberately unticked" (clear all three) - the same technique the
@@ -995,8 +1046,12 @@ def apply_tags(root, git_root, gic_root, form):
                     bits |= bit
             new_flags = (old_flags & ~AREA_FLAG_KNOWN) | bits
             if new_flags != old_flags:
-                setv(d, "Flags", new_flags, "dword")
                 touched = True
+                if dry_run:
+                    diffs.append((res, "Flags", area_type_label(old_flags),
+                                 area_type_label(new_flags)))
+                else:
+                    setv(d, "Flags", new_flags, "dword")
         new_ref = form.get("ref_" + res, [""])[0].strip().lower()
         if new_ref and new_ref != res:
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
@@ -1008,19 +1063,26 @@ def apply_tags(root, git_root, gic_root, form):
         else:
             new_ref = ""
         if new_ref:
-            setv(d, "ResRef", new_ref, "resref")
             touched = True
+            if dry_run:
+                diffs.append((res, "ResRef (renames .are/.git/.gic.json)",
+                             res, new_ref))
+            else:
+                setv(d, "ResRef", new_ref, "resref")
         if touched:
-            json_save(path, d)
-            invalidate(path)
             changed.append(res)
-        if new_ref:
+            if not dry_run:
+                json_save(path, d)
+                invalidate(path)
+        if new_ref and not dry_run:
             for base, ext in ((root, ".are.json"), (git_root, ".git.json"),
                                (gic_root, ".gic.json")):
                 old_p = os.path.join(base, res + ext)
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(base, new_ref + ext))
                     invalidate(old_p)
+    if dry_run:
+        return diffs, errors
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
     return result_page("Names / tags updated", changed, resrefs, extra)
 
@@ -1034,17 +1096,68 @@ def result_page(title, changed, selected, extra=""):
     return page(title, body)
 
 
-# --- Remove placed objects (creatures/placeables/loose items + their -------
-#     nested inventory) from selected areas' .git.json -----------------------
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+    """Old -> new confirmation step shared by every bulk area editor. `form`
+    is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
+    what was submitted here - the real apply_* runs are unchanged; this
+    only ever calls them with dry_run=True first."""
+    err_html = "".join("<p class='err'>%s</p>" % esc(e) for e in (errors or []))
+    if not diffs:
+        return page(title + " - preview",
+                    "%s<p class='note'>No changes - every submitted value "
+                    "is blank or already matches the current data.</p>"
+                    "<p><a href='%s'>Back to areas</a></p>" %
+                    (err_html, purl("/areas")))
+    rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" %
+        (esc(res), esc(f), esc(old) if old not in (None, "") else "<i>(none)</i>",
+         esc(new))
+        for res, f, old, new in diffs)
+    hidden = "".join(
+        "<input type='hidden' name='%s' value='%s'>" % (esc(k), esc(v))
+        for k, vals in form.items() for v in vals)
+    body = (
+        "%s<p><b>%d</b> change(s) across <b>%d</b> of <b>%d</b> selected "
+        "area(s):</p>"
+        "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
+        "<th>New</th></tr>%s</table>"
+        "<form method='post' action='%s'>%s"
+        "<input type='submit' value='Confirm &amp; Apply'></form>"
+        "<p><a href='%s'>Cancel - back to areas</a></p>" %
+        (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
+         rows, apply_action, hidden, purl("/areas")))
+    return page(title + " - preview", body)
+
+
+# --- Remove placed objects (creatures/placeables/loose items/doors/triggers/
+#     waypoints/sounds/stores/encounters + their nested inventory) from
+#     selected areas' .git.json ------------------------------------------
 # Top-level placed-object list fields, keyed by a short URL-safe category
 # name. Field name spacing is genuinely inconsistent in GFF-JSON ("Creature
-# List" / "Placeable List" are spaced, bare "List" holds loose ground items)
-# - that's the real shape, not a typo to fix.
+# List" / "Placeable List" are spaced, "TriggerList"/"WaypointList"/
+# "SoundList"/"StoreList" aren't, bare "List" holds loose ground items) -
+# verified against real .git files, not a typo to fix.
 OBJECT_LIST_FIELDS = {
     "creature": "Creature List",
     "placeable": "Placeable List",
     "item": "List",
+    "door": "Door List",
+    "trigger": "TriggerList",
+    "waypoint": "WaypointList",
+    "sound": "SoundList",
+    "store": "StoreList",
+    "encounter": "Encounter List",
 }
+
+# Categories whose Tag can be a door/trigger transition target (LinkedTo) or
+# a script's GetWaypointByTag/GetNearestObjectByTag lookup - removing one can
+# silently break a transition or script hook elsewhere in the module. This is
+# exactly the "higher blast radius" TODO.md deferred these categories over;
+# surfaced as an inline per-row warning (same warn-don't-block pattern the
+# tags-rename feature already uses for the identical LinkedTo/tag risk), not
+# a removal block - the app has no way to verify "elsewhere" is actually
+# clear, only that this row itself is a live transition endpoint.
+LINKED_CATEGORIES = {"door", "trigger", "waypoint"}
 
 # Nested inventory fields per top-level category. A loose ground item can
 # carry its own ItemList too (bag-of-holding-style items) - same field/shape
@@ -1065,12 +1178,25 @@ def _obj_position(entry):
 def _obj_name(category, entry):
     """Display name for a placed instance - .git entries carry the same
     localized-name fields as their blueprint (FirstName/LastName for
-    creatures, LocalizedName/LocName for placeables and items)."""
+    creatures, LocalizedName/LocName for everything else)."""
     if category == "creature":
         first = loc_get(entry, "FirstName")
         last = loc_get(entry, "LastName")
         return ("%s %s" % (first, last)).strip()
     return loc_get(entry, "LocalizedName") or loc_get(entry, "LocName") or ""
+
+
+def _obj_blueprint(entry):
+    """Blueprint resref - TemplateResRef for every category except placed
+    stores, which use a bare ResRef field instead (verified against a real
+    StoreList entry)."""
+    return getv(entry, "TemplateResRef", getv(entry, "ResRef", ""))
+
+
+def _obj_linked_to(category, entry):
+    """Non-empty only for a door/trigger/waypoint that's a live transition
+    target or script-lookup anchor - see LINKED_CATEGORIES."""
+    return getv(entry, "LinkedTo", "") if category in LINKED_CATEGORIES else ""
 
 
 def _inventory_rows_html(res, category, idx, entry):
@@ -1140,29 +1266,35 @@ def render_remove_objects_form(root, git_root, resrefs):
             for idx, entry in enumerate(entries):
                 tag = getv(entry, "Tag", "")
                 name = _obj_name(category, entry)
-                blueprint = getv(entry, "TemplateResRef", "")
+                blueprint = _obj_blueprint(entry)
                 x, y = _obj_position(entry)
+                linked = _obj_linked_to(category, entry)
                 cb_value = "|".join((res, category, str(idx)))
                 pos_sort = "%012.3f,%012.3f" % (x, y)
+                row_class, linked_html = "", ""
+                if linked:
+                    row_class = " class='qnm-linked'"
+                    linked_html = "<span class='warn'>-&gt; %s</span>" % esc(linked)
                 area_rows.append(
-                    "<tr><td><input type='checkbox' name='del' value='%s'></td>"
+                    "<tr%s><td><input type='checkbox' name='del' value='%s'></td>"
                     "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
-                    "<td data-sort='%s'>%.1f, %.1f</td></tr>" %
-                    (esc(cb_value), esc(category), esc(name), esc(tag),
-                     esc(blueprint), esc(pos_sort), x, y))
+                    "<td data-sort='%s'>%.1f, %.1f</td><td>%s</td></tr>" %
+                    (row_class, esc(cb_value), esc(category), esc(name), esc(tag),
+                     esc(blueprint), esc(pos_sort), x, y, linked_html))
                 area_rows.append(_inventory_rows_html(res, category, idx, entry))
         area_rows = [r for r in area_rows if r]
         if not area_rows:
             continue
         sections.append(
-            "<h3>%s</h3><table class='remove-objects'><tr><th></th>%s%s%s%s%s</tr>%s</table>" %
+            "<h3>%s</h3><table class='remove-objects'><tr><th></th>%s%s%s%s%s%s</tr>%s</table>" %
             (esc(res), sth("Type"), sth("Name"), sth("Tag"), sth("Blueprint"),
-             sth("Position"), "".join(area_rows)))
+             sth("Position"), sth("Linked to"), "".join(area_rows)))
 
     if not sections:
         return page("Remove placed objects",
-                    "<p class='note'>No placeables, creatures, or loose "
-                    "items found in the selected area(s).</p>"
+                    "<p class='note'>No placeables, creatures, loose items, "
+                    "doors, triggers, waypoints, sounds, stores, or "
+                    "encounters found in the selected area(s).</p>"
                     "<p><a href='%s'>Back</a></p>" % purl("/areas"))
 
     body = ("<p><input type='search' placeholder='Filter by name/tag/blueprint...' "
@@ -1171,6 +1303,12 @@ def render_remove_objects_form(root, git_root, resrefs):
             "<p class='note'>Tick objects to REMOVE, then Apply. First edit "
             "of each area keeps a one-time .git.json.bak backup, but this is "
             "otherwise permanent - review before applying.</p>"
+            "<p class='warn'>Rows with a <b>Linked to</b> value are a door/"
+            "trigger transition endpoint or a waypoint another object may "
+            "target by tag - removing one can silently break that link "
+            "elsewhere in the module. The app does not chase or verify "
+            "those references (same non-goal as the tags-rename feature) -"
+            " review the target before removing.</p>"
             "<input type='submit' value='Remove selected'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/objects/apply"), hidden_resrefs(resrefs),
@@ -1819,24 +1957,145 @@ def skill_name(skill_id):
     return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
 
 
+# --- Project-specific 2DA/custom-TLK overlay ---------------------------
+# --twoda-dir/--custom-tlk (set in main()) let a project's own merged 2das
+# (extracted from its HAKs) and custom TLK resolve HAK-added or
+# HAK-overridden rows the stock bin/wiki_data/*.json tables don't cover -
+# the gap _build_stock.py's docstring already flagged. Both are optional;
+# every *_options() below still works off the stock JSON alone otherwise.
+TWODA_DIR = None
+CUSTOM_TLK = {}
+CUSTOM_TLK_OFFSET = 0x01000000  # bit 24 set -> module's own custom TLK
+
+
+def read_tlk(path):
+    """Parse a .tlk (TLK V3.0) file into {strref: text}. Only entries with
+    the TEXT_PRESENT flag set are included."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[0:4] != b"TLK ":
+        raise ValueError("not a TLK file: %s" % path)
+    count, entries_off = struct.unpack_from("<II", data, 12)
+    out = {}
+    for i in range(count):
+        off = 20 + i * 40
+        flags, = struct.unpack_from("<I", data, off)
+        if not (flags & 0x1):
+            continue
+        str_off, str_size = struct.unpack_from("<II", data, off + 28)
+        start = entries_off + str_off
+        out[i] = data[start:start + str_size].decode("cp1252", "replace")
+    return out
+
+
+def parse_2da(path):
+    """Parse a 2DA V2.0 file. Returns (headers, rows); row[0] is the row
+    index as text, subsequent cells align 1:1 with headers."""
+    with open(path, encoding="cp1252", errors="replace") as fh:
+        lines = fh.read().splitlines()
+    i = 0
+    while i < len(lines) and not lines[i].strip().startswith("2DA"):
+        i += 1
+    i += 1
+    while i < len(lines) and (not lines[i].strip()
+                              or lines[i].lstrip().upper().startswith("DEFAULT")):
+        i += 1
+    if i >= len(lines):
+        return [], []
+
+    def split(line):
+        out, j, n = [], 0, len(line)
+        while j < n:
+            while j < n and line[j] in " \t":
+                j += 1
+            if j >= n:
+                break
+            if line[j] == '"':
+                k = j + 1
+                while k < n and line[k] != '"':
+                    k += 1
+                out.append(line[j + 1:k])
+                j = k + 1
+            else:
+                k = j
+                while k < n and line[k] not in " \t":
+                    k += 1
+                tok = line[j:k]
+                out.append("" if tok == "****" else tok)
+                j = k
+        return out
+
+    headers = split(lines[i])
+    rows = [c for ln in lines[i + 1:] if ln.strip() for c in [split(ln)] if c]
+    return headers, rows
+
+
+def col_index(headers, name):
+    lower = [h.lower() for h in headers]
+    return lower.index(name.lower()) + 1 if name.lower() in lower else None
+
+
+def load_named_2da_options(json_name, twoda_name, name_col, label_col):
+    """(id, name) pairs for a 2da-backed picker (music/appearance/feat).
+
+    Base names come from the pre-baked bin/wiki_data/<json_name>.json
+    (built off a stock install's dialog.tlk). When --twoda-dir/--custom-tlk
+    are given, also live-parses the project's own <twoda_name> so a
+    HAK-added row - or a HAK-overridden stock row whose Name/Description
+    cell now points into the module's own custom TLK (>= 0x01000000) -
+    resolves too; a row with no strref at all falls back to a title-cased
+    label/resource cell."""
+    stock = {int(k): v for k, v in _load_stock_json(json_name).items()}
+    if not TWODA_DIR:
+        return sorted(stock.items())
+    path = os.path.join(TWODA_DIR, twoda_name)
+    if not os.path.isfile(path):
+        return sorted(stock.items())
+    headers, rows = parse_2da(path)
+    n_idx = col_index(headers, name_col)
+    l_idx = col_index(headers, label_col)
+    options = dict(stock)
+    for row in rows:
+        if not row:
+            continue
+        try:
+            ridx = int(row[0])
+        except ValueError:
+            continue
+        name_cell = row[n_idx] if n_idx is not None and n_idx < len(row) else ""
+        label_cell = row[l_idx] if l_idx is not None and l_idx < len(row) else ""
+        try:
+            ref = int(name_cell)
+        except (TypeError, ValueError):
+            ref = -1
+        if ref >= CUSTOM_TLK_OFFSET:
+            custom_name = CUSTOM_TLK.get(ref - CUSTOM_TLK_OFFSET, "")
+            if custom_name:
+                options[ridx] = custom_name
+                continue
+        if ridx not in options:
+            lbl = label_cell.replace("_", " ").strip()
+            options[ridx] = (lbl[:1].upper() + lbl[1:]) if lbl else str(ridx)
+    return sorted(options.items())
+
+
 def music_options():
     """ambientmusic.2da rows as (id, title) pairs, sorted by id - what the
     toolset's Music Day/Night/Battle picker shows in place of the raw
     resref/row number."""
-    data = _load_stock_json("music")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("music", "ambientmusic.2da",
+                                  "Description", "Resource")
 
 
 def appearance_options():
     """appearance.2da rows as (id, name) pairs, sorted by id."""
-    data = _load_stock_json("appearance")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("appearance", "appearance.2da",
+                                  "STRING_REF", "LABEL")
 
 
 def feat_options():
     """feat.2da rows as (id, name) pairs, sorted by id."""
-    data = _load_stock_json("feat")
-    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+    return load_named_2da_options("feat", "feat.2da", "FEAT", "LABEL")
 
 
 def utc_path(root, res):
@@ -3080,6 +3339,31 @@ class Handler(BaseHTTPRequestHandler):
                       "music": render_music_form,
                       "tags": render_tags_form}[action]
             self._send(render(root, resrefs))
+        elif sub == "/areas/scripts/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_scripts(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit area scripts", diffs, resrefs, form,
+                purl("/areas/scripts/apply")))
+        elif sub == "/areas/lighting/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_lighting(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit lighting & fog", diffs, resrefs, form,
+                purl("/areas/lighting/apply")))
+        elif sub == "/areas/music/preview":
+            resrefs = form.get("res", [])
+            diffs = apply_music(root, form, dry_run=True)
+            self._send(render_diff_preview(
+                "Bulk edit area music", diffs, resrefs, form,
+                purl("/areas/music/apply")))
+        elif sub == "/areas/tags/preview":
+            resrefs = form.get("res", [])
+            diffs, errors = apply_tags(root, proj.git_root, proj.gic_root,
+                                       form, dry_run=True)
+            self._send(render_diff_preview(
+                "Edit area names / tags / resrefs", diffs, resrefs, form,
+                purl("/areas/tags/apply"), errors))
         elif sub == "/areas/scripts/apply":
             self._send(apply_scripts(root, form))
         elif sub == "/areas/lighting/apply":
@@ -3387,7 +3671,23 @@ def main():
     ap.add_argument("--landing-dir", default=None,
                     help="where start.html lives and dropped .mod files are "
                          "scanned (default: the repo root above bin/)")
+    ap.add_argument("--twoda-dir", default=None, metavar="DIR",
+                    help="directory of this project's own merged 2das "
+                         "(ambientmusic.2da/appearance.2da/feat.2da, e.g. "
+                         "extracted from its HAKs) - resolves HAK-added or "
+                         "HAK-overridden rows the stock tables don't cover")
+    ap.add_argument("--custom-tlk", default=None, metavar="FILE",
+                    help="this project's custom .tlk, for strrefs >= "
+                         "0x01000000 in --twoda-dir's tables (see "
+                         "module.ifo's Mod_CustomTlk)")
     args = ap.parse_args()
+
+    if args.twoda_dir:
+        global TWODA_DIR
+        TWODA_DIR = os.path.abspath(args.twoda_dir)
+    if args.custom_tlk:
+        global CUSTOM_TLK
+        CUSTOM_TLK = read_tlk(args.custom_tlk)
 
     global LANDING_DIR
     NWN_MANAGER = _find_nwn_manager(args.nwn_manager)

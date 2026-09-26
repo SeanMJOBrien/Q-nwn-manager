@@ -54,7 +54,7 @@ module-wide).
 
 **UI flow:** form shows the four events with each event's **current distinct
 values** across the selection (so you can see divergence before overwriting).
-POST `/areas/scripts/apply`.
+POST `/areas/scripts/preview` -> confirm -> `/areas/scripts/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched:** the four `resref`-typed event fields in each `.are`.
 
@@ -78,7 +78,7 @@ all crypts, add fog to all swamps, switch areas to static night, etc.
 
 **UI flow:** form prefilled with the **first selected area's** current values
 (as reference; multi-area edits apply uniformly). Two fieldsets: colors and
-numerics. POST `/areas/lighting/apply`.
+numerics. POST `/areas/lighting/preview` -> confirm -> `/areas/lighting/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched (.are):**
 - Colors (dword, stored **0xBBGGRR** BGR — entered as `#rrggbb` hex and
@@ -113,7 +113,7 @@ visibly ignore sun/moon settings (engine behavior, not app).
 of areas without the toolset's Music properties tab.
 
 **UI flow:** form prefilled with the **first selected area's** current values
-(as reference; multi-area edits apply uniformly). POST `/areas/music/apply`.
+(as reference; multi-area edits apply uniformly). POST `/areas/music/preview` -> confirm -> `/areas/music/apply` (see "Bulk-edit confirmation step" below).
 
 **Fields touched (.are):** `MusicDay`/`MusicNight`/`MusicBattle` (int,
 ambientmusic.2da row index — 0 = none), `MusicDelay` (byte, 0 = start
@@ -129,18 +129,31 @@ tracks that carry no strref (Daggerford/HotU stingers). Same
 `_load_stock_json`/graceful-fallback contract as `class_name`/`feat_name`/
 `skill_name`: if `music.json` is missing, the fields fall back to plain
 number inputs with the old "look it up yourself" hint — never a crash.
-Only covers ambientmusic.2da rows the base game (or whatever install
-`_build_stock.py` ran against) actually has; a HAK-added custom track past
-row 137 shows as a bare number until `music.json` is regenerated against
-that install/module.
+
+**Project 2da/custom-TLK overlay:** `--twoda-dir DIR` (a project's own
+merged `ambientmusic.2da`/`appearance.2da`/`feat.2da`, e.g. extracted from
+its HAKs) and `--custom-tlk FILE` (its custom TLK) close the gap above -
+`load_named_2da_options()` live-parses `--twoda-dir`'s copy of the table,
+resolving any row whose Description/Name strref is `>= 0x01000000`
+(`CUSTOM_TLK_OFFSET`) via `--custom-tlk`, keeping the pre-baked stock name
+for every row it already knows, and title-casing the Resource/Label cell
+as a last resort for a row with no strref at all. Both flags are optional
+and pass straight through `nwn-manager console`/`edit-areas`'s existing
+"extra args forward to the tool" contract - no `nwn-manager` changes were
+needed. `read_tlk()`/`parse_2da()` are small stdlib-only re-implementations
+of `bin/wiki_data/_2da_lib.py`'s logic (kept duplicated rather than
+imported, matching this project's existing between-editor duplication
+convention - see `TODO.md`), so this works even in the frozen
+`nwn-pytools` binary with no `nwn_tlk`/`nwn_erf` on PATH.
 
 **Blank semantics:** blank ("(leave unchanged)") = keep per-area current
 value on every selected area.
 
-**Limitations:** no custom-TLK resolution for module-added ambientmusic.2da
-rows (module haks that append rows with strrefs into their own custom TLK,
-not dialog.tlk) — `_build_stock.py` only reads the stock table off a base
-NWN install; `resolve_name`'s custom-TLK dict is always empty here.
+**Limitations:** `--twoda-dir`'s tables must already be the project's
+*merged* result (base + HAK overrides stacked, e.g. via `nwn_erf -x` on
+each HAK plus manual override resolution) - the app doesn't compute HAK
+layering itself, it only parses whatever single `ambientmusic.2da` file
+sits in that directory.
 
 ---
 
@@ -150,7 +163,7 @@ NWN install; `resolve_name`'s custom-TLK dict is always empty here.
 needed, its file identity (ResRef).
 
 **UI flow:** per-area editable Tag input (prefilled) + optional "new resref"
-input (placeholder = keep). POST `/areas/tags/apply`.
+input (placeholder = keep). POST `/areas/tags/preview` -> confirm -> `/areas/tags/apply` (see "Bulk-edit confirmation step" below).
 
 **Behavior:**
 - Tag: written to `.are` `Tag` field when changed.
@@ -164,6 +177,48 @@ target tags, waypoint tags of the form `<TEAM>_VAULT` embed old tags, and
 `module.ifo`'s `Mod_Entry_Area` may point at the old resref. Grep the module
 after any rename. Per-area validation errors are reported inline and skip
 only the offending rename, not the whole batch.
+
+---
+
+## Bulk-edit confirmation step (scripts / lighting / music / tags)
+
+**Purpose:** catch fat-fingered bulk edits — a bad hex color, an off-by-one
+music row, a resref typo — across dozens of areas before anything is
+written, instead of only after the fact via the `.bak` recovery path.
+
+**Mechanism:** each of the four area bulk-editors above gained a
+`dry_run=False` parameter on its `apply_*` function. With `dry_run=True`,
+every code path that would call `gff_save`/`json_save` or (tags only)
+`os.replace` a renamed file is skipped **entirely** — no write of any kind
+reaches disk — and the function instead returns `(resref, field, old, new)`
+tuples for every field that would actually change (blank/unchanged
+submissions are never included, same semantics as a real apply). The form
+`action`s now point at a `.../preview` route that calls `apply_X(...,
+dry_run=True)` and renders the result through the shared
+`render_diff_preview()`: an old → new table, a "Confirm & Apply" button
+that **resubmits every original form field verbatim** as hidden inputs to
+the unchanged `.../apply` route, and a cancel link back to `/areas`. If
+nothing would change, the preview says so instead of showing an empty
+table. `apply_tags`' validation errors (bad resref, name collision) surface
+on the preview page too, not just after a real apply.
+
+**Why not a generic wrapper:** an earlier design monkey-patched
+`gff_save`/`json_save` to a no-op around an unmodified `apply_*` call,
+diffing the mutated in-memory dict before/after — appealingly generic, but
+wrong for tags: `apply_tags`' file-rename (`os.replace`) runs unconditionally
+whenever a new resref is set, **regardless of whether `gff_save` was ever
+called** — so that wrapper would rename files on disk during a "preview".
+Threading `dry_run` through each `apply_*` explicitly, so every write *and*
+every `os.replace` is individually gated, was the only version that's
+actually safe for a rename-capable feature — confirmed by hand: a
+`ref_<res>=newname` preview POST leaves the original `.are`/`.are.json`
+file present and unrenamed on disk.
+
+**Verified:** preview leaves the file byte-identical (checked before/after
+with `nwn_gff -k json` on a real `.are`); confirming re-submits the exact
+preview values and the file updates; an invalid resref's error message
+appears on the preview page; a no-op submission (blank or already-current
+values) shows "No changes" instead of an empty table.
 
 ---
 
@@ -238,9 +293,12 @@ XP/gold/age), plus:
 **Limitations:** both lookups gracefully degrade to the old raw-ID inputs
 if `appearance.json`/`feat.json` are missing (same `_load_stock_json`
 empty-dict fallback as everywhere else) — never a crash. Only stock rows
-are named; a HAK-added feat/appearance past the stock table's coverage
-needs its raw ID via the comma-separated feat box or the
-`Appearance_Type_raw` override. Skills, class list,
+are named unless `--twoda-dir`/`--custom-tlk` are given (see §4's "Project
+2da/custom-TLK overlay" — the same `load_named_2da_options()` backs
+`appearance_options()`/`feat_options()` too); without them, a HAK-added
+feat/appearance past the stock table's coverage needs its raw ID via the
+comma-separated feat box or the `Appearance_Type_raw` override.
+Skills, class list,
 spell lists, and inventory are view-adjacent but not editable here — use
 the `nwn-character-editor` skill's Python recipes for those (positional
 SkillList and slot-bitmask Equip_ItemList semantics make them poor fits
