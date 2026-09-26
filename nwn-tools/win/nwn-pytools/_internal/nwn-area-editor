@@ -575,6 +575,10 @@ LIGHT_NUM_FIELDS = [
     ("SunShadows", "byte", "0/1"),
     ("MoonShadows", "byte", "0/1"),
     ("WindPower", "int", "0-2"),
+    ("ChanceRain", "int", "0-100 (%)"),
+    ("ChanceSnow", "int", "0-100 (%)"),
+    ("ChanceLightning", "int", "0-100 (%)"),
+    ("SkyBox", "byte", "skyboxes.2da row (0 = none)"),
 ]
 LIGHT_COLOR_FIELDS = ["SunAmbientColor", "SunDiffuseColor", "SunFogColor",
                       "MoonAmbientColor", "MoonDiffuseColor", "MoonFogColor"]
@@ -585,6 +589,9 @@ MUSIC_FIELDS = [
     ("MusicBattle", "int", "ambientmusic.2da row (0 = none)"),
     ("MusicDelay", "byte", "0 = start immediately, 1 = delay day track"),
 ]
+# Fields whose value is an ambientmusic.2da row index - rendered as a
+# titled dropdown (via music_options()) instead of a bare number input.
+MUSIC_TRACK_FIELDS = {"MusicDay", "MusicNight", "MusicBattle"}
 # Area .are "Flags" bitmask (confirmed against nwn-mcp's area-tools.ts and
 # sampled area data): bit0 interior, bit1 underground, bit2 natural/outdoor.
 AREA_FLAG_INTERIOR = 1
@@ -825,7 +832,7 @@ def render_lighting_form(root, resrefs):
             "<fieldset><legend>Colors (hex #rrggbb)</legend>"
             "<table><tr><th>Field</th><th>New value</th>"
             "<th>Current (%s)</th></tr>%s</table></fieldset>"
-            "<fieldset><legend>Fog / cycle / wind</legend>"
+            "<fieldset><legend>Fog / cycle / wind / weather</legend>"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
             "<th>Hint</th></tr>%s</table></fieldset>"
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
@@ -863,24 +870,44 @@ def apply_lighting(root, form):
 def render_music_form(root, resrefs):
     # Prefill from the first selected area so single-area edits show state.
     d0 = load_cached(are_path(root, resrefs[0]))
+    opts = music_options()
+    titles = dict(opts)
+
+    def current_display(f):
+        v = getv(d0, f, "")
+        if f in MUSIC_TRACK_FIELDS and v in titles:
+            return "%s (%s)" % (esc(titles[v]), v)
+        return esc(v)
+
+    def field_input(f):
+        if f in MUSIC_TRACK_FIELDS and opts:
+            options = ("<option value=''>(leave unchanged)</option>" +
+                       "".join("<option value='%d'>%d - %s</option>" %
+                               (i, i, esc(t)) for i, t in opts))
+            return "<select name='%s'>%s</select>" % (f, options)
+        return "<input type='text' name='%s' placeholder='(leave unchanged)'>" % f
+
     rows = "".join(
-        "<tr><td>%s</td>"
-        "<td><input type='text' name='%s' placeholder='(leave unchanged)'></td>"
-        "<td>%s</td><td class='note'>%s</td></tr>" %
-        (f, f, esc(getv(d0, f, "")), hint)
+        "<tr><td>%s</td><td>%s</td><td>%s</td><td class='note'>%s</td></tr>" %
+        (f, field_input(f), current_display(f), hint)
         for f, _t, hint in MUSIC_FIELDS)
+    note = ("<p class='note'>Blank fields are left unchanged on every area."
+            + (" Day/Night/Battle titles come from ambientmusic.2da / "
+               "dialog.tlk, same as the toolset's music picker."
+               if opts else
+               " Day/Night/Battle values are row indices into "
+               "ambientmusic.2da (look them up with the toolset's music "
+               "picker or nwn-mcp's resolve_2da/search_2da tools) - not "
+               "resrefs. Run bin/wiki_data/_build_stock.py to enable "
+               "titled dropdowns here.") + "</p>")
     body = ("<p>Editing <b>%d</b> area(s): %s</p>"
             "<form method='post' action='%s'>%s"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
-            "<th>Hint</th></tr>%s</table>"
-            "<p class='note'>Blank fields are left unchanged on every area. "
-            "Day/Night/Battle values are row indices into ambientmusic.2da "
-            "(look them up with the toolset's music picker or nwn-mcp's "
-            "resolve_2da/search_2da tools) - not resrefs.</p>"
+            "<th>Hint</th></tr>%s</table>%s"
             "<input type='submit' value='Apply to selected areas'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (len(resrefs), esc(", ".join(resrefs)), purl("/areas/music/apply"),
-             hidden_resrefs(resrefs), esc(resrefs[0]), rows, purl("/areas")))
+             hidden_resrefs(resrefs), esc(resrefs[0]), rows, note, purl("/areas")))
     return page("Bulk edit area music", body)
 
 
@@ -1792,6 +1819,26 @@ def skill_name(skill_id):
     return _load_stock_json("skills").get(str(skill_id), "skill %s" % skill_id)
 
 
+def music_options():
+    """ambientmusic.2da rows as (id, title) pairs, sorted by id - what the
+    toolset's Music Day/Night/Battle picker shows in place of the raw
+    resref/row number."""
+    data = _load_stock_json("music")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
+def appearance_options():
+    """appearance.2da rows as (id, name) pairs, sorted by id."""
+    data = _load_stock_json("appearance")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
+def feat_options():
+    """feat.2da rows as (id, name) pairs, sorted by id."""
+    data = _load_stock_json("feat")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
 def utc_path(root, res):
     return os.path.join(root, res + ".utc.json")
 
@@ -2141,9 +2188,29 @@ def render_char_form(d, action, ident_html, root):
         return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
                 "</td></tr>" % (f, f, esc(getv(d, f, ""))))
 
+    def appear_input(f):
+        if f == "Appearance_Type":
+            opts = appearance_options()
+            if opts:
+                current = getv(d, f, "")
+                titles = dict(opts)
+                option_html = ["<option value=''%s>(leave unchanged)</option>" %
+                               ("" if current in titles else " selected")]
+                option_html += ["<option value='%d'%s>%d - %s</option>" %
+                                (i, " selected" if i == current else "", i, esc(t))
+                                for i, t in opts]
+                return ("<tr><td>%s</td><td><select name='%s'>%s</select> "
+                        "<input type='text' name='Appearance_Type_raw' "
+                        "size='6' placeholder='custom ID'>"
+                        "<br><span class='note'>custom ID overrides the "
+                        "dropdown when filled - for a HAK appearance not in "
+                        "appearance.2da</span></td></tr>" %
+                        (f, f, "".join(option_html)))
+        return num_input(f)
+
     abil = "".join(num_input(f) for f in ABILITY_FIELDS)
     stats = "".join(num_input(f) for f, _t in STAT_FIELDS if f in d)
-    appear = "".join(num_input(f) for f, _t in APPEAR_FIELDS if f in d)
+    appear = "".join(appear_input(f) for f, _t in APPEAR_FIELDS if f in d)
     portrait = ("<p class='note'>Current portrait: <b>%s</b></p>" %
                esc(portrait_name(getv(d, "PortraitId", "")))
                if "PortraitId" in d else "")
@@ -2154,6 +2221,13 @@ def render_char_form(d, action, ident_html, root):
         "<input type='checkbox' name='delfeat' value='%d'> %d %s</label>" %
         (n, n, esc(feat_name(n)))
         for n in feats)
+    feat_opts = feat_options()
+    feat_picker = ("<p>Add feats by name (ctrl/cmd-click for several, or "
+                   "type to jump):<br>"
+                   "<select name='addfeat_multi' multiple size='8' "
+                   "style='width:100%%'>%s</select></p>" %
+                   "".join("<option value='%d'>%d - %s</option>" % (i, i, esc(t))
+                           for i, t in feat_opts)) if feat_opts else ""
 
     # Missing field means the toolset/engine default, which is lootable.
     lootable = bool(getv(d, "Lootable", 1))
@@ -2180,11 +2254,12 @@ def render_char_form(d, action, ident_html, root):
         "dropped when it dies.</p></fieldset>"
         "<fieldset><legend>Appearance</legend>%s<table>%s</table>"
         "<p class='note'>Only fields present in this file are shown; static-"
-        "appearance creatures have no head/body-part fields. IDs come from "
-        "appearance.2da / portraits.2da etc.</p></fieldset>"
+        "appearance creatures have no head/body-part fields. Remaining IDs "
+        "(PortraitId etc.) come from portraits.2da etc.</p></fieldset>"
         "<fieldset><legend>Equipment &amp; Inventory</legend>%s</fieldset>"
-        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s"
-        "<p>Add feat IDs (comma-separated): "
+        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s%s"
+        "<p>Add feat IDs by number too (comma-separated, e.g. a HAK feat not "
+        "in the list above): "
         "<input type='text' name='addfeats' placeholder='e.g. 1,28,411'></p>"
         "</fieldset>"
         "<p class='note'>Blank numeric fields are left unchanged.</p>"
@@ -2193,7 +2268,7 @@ def render_char_form(d, action, ident_html, root):
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
          abil, stats, render_skills_html(d), loot_select, portrait, appear,
          render_equipment(root, d), len(feats),
-         feat_boxes or "<p class='note'>none</p>"))
+         feat_boxes or "<p class='note'>none</p>", feat_picker))
 
 
 def apply_char_edits(d, form):
@@ -2208,6 +2283,10 @@ def apply_char_edits(d, form):
     if tag is not None and tag != getv(d, "Tag"):
         setv(d, "Tag", tag, "cexostring")
         touched = True
+
+    custom_appear = form.get("Appearance_Type_raw", [""])[0].strip()
+    if custom_appear:
+        form["Appearance_Type"] = [custom_appear]
 
     numeric = [(f, "byte") for f in ABILITY_FIELDS] + STAT_FIELDS + APPEAR_FIELDS
     for f, gff_type in numeric:
@@ -2261,6 +2340,7 @@ def apply_char_edits(d, form):
     delfeats = {int(x) for x in form.get("delfeat", [])}
     addfeats = [int(x) for x in
                 re.split(r"[,\s]+", form.get("addfeats", [""])[0].strip()) if x]
+    addfeats += [int(x) for x in form.get("addfeat_multi", []) if x]
     if delfeats or addfeats:
         fl = d.setdefault("FeatList", {"type": "list", "value": []})
         entries = fl["value"]
@@ -2271,6 +2351,7 @@ def apply_char_edits(d, form):
             if n not in have:
                 entries.append({"__struct_id": sid,
                                 "Feat": {"type": "word", "value": n}})
+                have.add(n)
         touched = True
     return touched
 
@@ -3342,7 +3423,12 @@ def main():
     if not SINGLE_MODE:
         print("  ingest start page: %s/start   (drop folder: %s)"
               % (base, LANDING_DIR), flush=True)
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.", flush=True)
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

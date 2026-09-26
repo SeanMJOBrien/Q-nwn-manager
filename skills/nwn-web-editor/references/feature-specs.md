@@ -88,7 +88,9 @@ numerics. POST `/areas/lighting/apply`.
 - Numerics: `SunFogAmount`/`MoonFogAmount` (byte 0–15), `FogClipDist`
   (float), `DayNightCycle` (byte 0/1), `IsNight` (byte, only matters when
   cycle=0), `LightingScheme` (byte), `ShadowOpacity` (byte 0–100),
-  `SunShadows`/`MoonShadows` (byte 0/1), `WindPower` (int 0–2).
+  `SunShadows`/`MoonShadows` (byte 0/1), `WindPower` (int 0–2),
+  `ChanceRain`/`ChanceSnow`/`ChanceLightning` (int 0–100, %),
+  `SkyBox` (byte, skyboxes.2da row).
 
 **Blank semantics:** blank = keep per-area current value (lets you set fog
 density on 40 areas without touching their individual colors).
@@ -97,9 +99,11 @@ density on 40 areas without touching their individual colors).
 field's GFF type (float vs int). Out-of-range values are not clamped — the
 engine tolerates some and ignores others; stay in documented ranges.
 
-**Limitations:** weather odds (`ChanceRain/Snow/Lightning`) and `SkyBox`
-aren't exposed yet — trivial to add to `LIGHT_NUM_FIELDS`. Interior-flagged
-areas may visibly ignore sun/moon settings (engine behavior, not app).
+**Limitations:** `SkyBox` is a raw skyboxes.2da row number, not a titled
+dropdown — skyboxes.2da has no TLK-referenced name column (unlike
+ambientmusic/appearance/feat), so it wasn't worth a stock-data lookup for
+6 stock rows; check the toolset's picker. Interior-flagged areas may
+visibly ignore sun/moon settings (engine behavior, not app).
 
 ---
 
@@ -204,22 +208,43 @@ id; substring filter) -> `/creature?res=` -> POST `/creature/apply`.
 
 **Fields touched:** same identity/ability/stat set as .bic (minus
 XP/gold/age), plus:
-- **Appearance:** `Appearance_Type` (appearance.2da row), `PortraitId`,
-  `Gender`, `Race`, `Phenotype`, and — **only when present in the file** —
-  the dynamic-model fields `Appearance_Head`, `Color_Hair/Skin/Tattoo1/2`,
-  `Tail_New`, `Wings_New`. Static monster models don't carry them and the
-  form doesn't invent them.
-- **Feats:** current feat IDs rendered as checkboxes (tick = remove) plus a
-  comma-separated add box. Adds copy an existing entry's `__struct_id`
-  (default 1), dedupe against present feats, and land as
-  `{"__struct_id":1,"Feat":{"type":"word","value":N}}` (verified round-trip).
+- **Appearance:** `Appearance_Type` renders as a titled `<select>` (via
+  `appearance_options()` / `bin/wiki_data/appearance.json`, same
+  `music_options()`-style lookup as area music) — "(leave unchanged)" is
+  `selected` by default unless the current value is a known appearance
+  row, in which case that option is pre-selected instead, so re-submitting
+  without touching it is a no-op. A companion `Appearance_Type_raw` text
+  input sits next to the dropdown for a HAK appearance past
+  appearance.json's stock coverage — when filled, it overrides the
+  dropdown's selection entirely (`apply_char_edits` rewrites
+  `form["Appearance_Type"]` from it before the generic numeric-field loop
+  runs). `PortraitId`, `Gender`, `Race`, `Phenotype`, and — **only when
+  present in the file** — the dynamic-model fields `Appearance_Head`,
+  `Color_Hair/Skin/Tattoo1/2`, `Tail_New`, `Wings_New` stay plain number
+  inputs. Static monster models don't carry them and the form doesn't
+  invent them.
+- **Feats:** current feat IDs rendered as checkboxes (tick = remove), plus
+  **two** add mechanisms: a named multi-select (`addfeat_multi`, via
+  `feat_options()` / `feat.json` — ctrl/cmd-click, or type-to-jump, for
+  several at once) and the original comma-separated raw-ID box
+  (`addfeats`, for HAK feats past feat.json's stock coverage). Both feed
+  the same add loop, which dedupes against present feats **and** across
+  the two input sources (`have` is updated as entries are appended, not
+  just seeded once) — picking a feat in both boxes doesn't double it.
+  Adds copy an existing entry's `__struct_id` (default 1) and land as
+  `{"__struct_id":1,"Feat":{"type":"word","value":N}}` (verified
+  round-trip).
 
-**Limitations:** feat/appearance IDs are raw 2da row numbers — the app has no
-2da name lookup (would need a `--twoda-dir`; see feat.2da / appearance.2da
-for the mapping). Skills, class list, spell lists, and inventory are
-view-adjacent but not editable here — use the `nwn-character-editor` skill's
-Python recipes for those (positional SkillList and slot-bitmask
-Equip_ItemList semantics make them poor fits for a generic form).
+**Limitations:** both lookups gracefully degrade to the old raw-ID inputs
+if `appearance.json`/`feat.json` are missing (same `_load_stock_json`
+empty-dict fallback as everywhere else) — never a crash. Only stock rows
+are named; a HAK-added feat/appearance past the stock table's coverage
+needs its raw ID via the comma-separated feat box or the
+`Appearance_Type_raw` override. Skills, class list,
+spell lists, and inventory are view-adjacent but not editable here — use
+the `nwn-character-editor` skill's Python recipes for those (positional
+SkillList and slot-bitmask Equip_ItemList semantics make them poor fits
+for a generic form).
 
 ---
 

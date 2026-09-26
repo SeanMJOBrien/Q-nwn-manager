@@ -201,6 +201,18 @@ def music_options():
     return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
 
 
+def appearance_options():
+    """appearance.2da rows as (id, name) pairs, sorted by id."""
+    data = _load_stock_json("appearance")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
+def feat_options():
+    """feat.2da rows as (id, name) pairs, sorted by id."""
+    data = _load_stock_json("feat")
+    return sorted(((int(k), v) for k, v in data.items()), key=lambda kv: kv[0])
+
+
 # --- HTML helpers -----------------------------------------------------------
 
 def esc(s):
@@ -280,6 +292,10 @@ LIGHT_NUM_FIELDS = [
     ("SunShadows", "byte", "0/1"),
     ("MoonShadows", "byte", "0/1"),
     ("WindPower", "int", "0-2"),
+    ("ChanceRain", "int", "0-100 (%)"),
+    ("ChanceSnow", "int", "0-100 (%)"),
+    ("ChanceLightning", "int", "0-100 (%)"),
+    ("SkyBox", "byte", "skyboxes.2da row (0 = none)"),
 ]
 LIGHT_COLOR_FIELDS = ["SunAmbientColor", "SunDiffuseColor", "SunFogColor",
                       "MoonAmbientColor", "MoonDiffuseColor", "MoonFogColor"]
@@ -453,7 +469,7 @@ def render_lighting_form(root, resrefs):
             "<fieldset><legend>Colors (hex #rrggbb)</legend>"
             "<table><tr><th>Field</th><th>New value</th>"
             "<th>Current (%s)</th></tr>%s</table></fieldset>"
-            "<fieldset><legend>Fog / cycle / wind</legend>"
+            "<fieldset><legend>Fog / cycle / wind / weather</legend>"
             "<table><tr><th>Field</th><th>New value</th><th>Current (%s)</th>"
             "<th>Hint</th></tr>%s</table></fieldset>"
             "<p class='note'>Blank fields are left unchanged on every area.</p>"
@@ -856,11 +872,31 @@ def render_char_form(d, action, ident_html, is_bic):
         return ("<tr><td>%s</td><td><input type='text' name='%s' value='%s'>"
                 "</td></tr>" % (f, f, esc(getv(d, f, ""))))
 
+    def appear_input(f):
+        if f == "Appearance_Type":
+            opts = appearance_options()
+            if opts:
+                current = getv(d, f, "")
+                titles = dict(opts)
+                option_html = ["<option value=''%s>(leave unchanged)</option>" %
+                               ("" if current in titles else " selected")]
+                option_html += ["<option value='%d'%s>%d - %s</option>" %
+                                (i, " selected" if i == current else "", i, esc(t))
+                                for i, t in opts]
+                return ("<tr><td>%s</td><td><select name='%s'>%s</select> "
+                        "<input type='text' name='Appearance_Type_raw' "
+                        "size='6' placeholder='custom ID'>"
+                        "<br><span class='note'>custom ID overrides the "
+                        "dropdown when filled - for a HAK appearance not in "
+                        "appearance.2da</span></td></tr>" %
+                        (f, f, "".join(option_html)))
+        return num_input(f)
+
     abil = "".join(num_input(f) for f in ABILITY_FIELDS)
     stats = "".join(num_input(f) for f, _t in STAT_FIELDS if f in d)
     if is_bic:
         stats += "".join(num_input(f) for f, _t in BIC_EXTRA_FIELDS if f in d)
-    appear = "".join(num_input(f) for f, _t in APPEAR_FIELDS if f in d)
+    appear = "".join(appear_input(f) for f, _t in APPEAR_FIELDS if f in d)
 
     align = "".join(
         "<tr><td>%s</td><td><input type='text' name='%s' value='%s' size='4'>"
@@ -881,6 +917,13 @@ def render_char_form(d, action, ident_html, is_bic):
         "<input type='checkbox' name='delfeat' value='%d'> %d %s</label>" %
         (n, n, esc(feat_name(n)))
         for n in feats)
+    feat_opts = feat_options()
+    feat_picker = ("<p>Add feats by name (ctrl/cmd-click for several, or "
+                   "type to jump):<br>"
+                   "<select name='addfeat_multi' multiple size='8' "
+                   "style='width:100%%'>%s</select></p>" %
+                   "".join("<option value='%d'>%d - %s</option>" % (i, i, esc(t))
+                           for i, t in feat_opts)) if feat_opts else ""
 
     # Everything below the shared creature fields is .bic-only: a .utc
     # blueprint has no level-up history, quickbar or carried player inventory.
@@ -916,10 +959,11 @@ def render_char_form(d, action, ident_html, is_bic):
         "<fieldset><legend>Skill ranks</legend>%s</fieldset>"
         "<fieldset><legend>Appearance</legend><table>%s</table>"
         "<p class='note'>Only fields present in this file are shown; static-"
-        "appearance creatures have no head/body-part fields. IDs come from "
-        "appearance.2da / portraits.2da etc.</p></fieldset>"
-        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s"
-        "<p>Add feat IDs (comma-separated): "
+        "appearance creatures have no head/body-part fields. Remaining IDs "
+        "(PortraitId etc.) come from portraits.2da etc.</p></fieldset>"
+        "<fieldset><legend>Feats (%d) - tick to REMOVE</legend>%s%s"
+        "<p>Add feat IDs by number too (comma-separated, e.g. a HAK feat not "
+        "in the list above): "
         "<input type='text' name='addfeats' placeholder='e.g. 1,28,411'></p>"
         "<p class='note'>On a player character, adding a feat here without a "
         "matching level-up entry will show up in the integrity check below.</p>"
@@ -929,7 +973,8 @@ def render_char_form(d, action, ident_html, is_bic):
         (action, ident_html, esc(loc_get(d, "FirstName")),
          esc(loc_get(d, "LastName")), esc(getv(d, "Tag", "")),
          abil, stats, render_skills_html(d), appear,
-         len(feats), feat_boxes or "<p class='note'>none</p>", bic_html))
+         len(feats), feat_boxes or "<p class='note'>none</p>", feat_picker,
+         bic_html))
     return body
 
 
@@ -991,6 +1036,10 @@ def apply_char_edits(d, form, is_bic):
         setv(d, "Tag", tag, "cexostring")
         touched = True
 
+    custom_appear = form.get("Appearance_Type_raw", [""])[0].strip()
+    if custom_appear:
+        form["Appearance_Type"] = [custom_appear]
+
     numeric = [(f, "byte") for f in ABILITY_FIELDS] + STAT_FIELDS + APPEAR_FIELDS
     if is_bic:
         numeric += BIC_EXTRA_FIELDS + [(f, t) for f, t, _h in ALIGN_FIELDS]
@@ -1021,6 +1070,7 @@ def apply_char_edits(d, form, is_bic):
     delfeats = {int(x) for x in form.get("delfeat", [])}
     addfeats = [int(x) for x in
                 re.split(r"[,\s]+", form.get("addfeats", [""])[0].strip()) if x]
+    addfeats += [int(x) for x in form.get("addfeat_multi", []) if x]
     if delfeats or addfeats:
         fl = d.setdefault("FeatList", {"type": "list", "value": []})
         entries = fl["value"]
@@ -1031,6 +1081,7 @@ def apply_char_edits(d, form, is_bic):
             if n not in have:
                 entries.append({"__struct_id": sid,
                                 "Feat": {"type": "word", "value": n}})
+                have.add(n)
         touched = True
     return touched
 
@@ -1315,7 +1366,12 @@ def main():
     print("data dir: %s" % Handler.root)
     print("bic dir:  %s" % Handler.bic_root)
     print("Serving on http://%s:%d/ (Ctrl-C to stop)" % (args.host, args.port))
-    srv.serve_forever()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":
