@@ -1,0 +1,585 @@
+#!/usr/bin/env python3
+"""nwn-palette - view and edit a module's toolset palettes (*palcus.itp).
+
+Works on the GFF-as-JSON documents nwn-manager keeps in <project>/unpacked/
+(creaturepalcus.itp.json, itempalcus.itp.json, ...), so no nwn_gff needed.
+bin/nwn-area-editor imports this file for the console's /palettes pages;
+both front ends therefore share one implementation.
+
+Palette shape (see docs/PLAN / the NWN wiki "Toolset Palette ITP" page):
+  MAIN: list of top-level structs; each struct is either
+    - a folder: optional ID (byte, unique within the palette), optional LIST
+      of children, and a name, or
+    - a blueprint leaf: RESREF + a name (creature leaves add CR and FACTION).
+  A name is NAME (cexostring; EE's replacement for the old DELETE_ME) or a
+  STRREF (dword, stock/TLK text). Every struct needs one or the other.
+  Blueprints whose PaletteID is 255 are deliberately kept out of palettes.
+
+Usage:
+  nwn-palette [--dir unpacked] list
+  nwn-palette tree  <palette> [--leaves]
+  nwn-palette check [<palette>]
+  nwn-palette rename <palette> <node> <new name>      [--dry-run]
+  nwn-palette mkdir  <palette> <parent|/> <name>      [--dry-run]
+  nwn-palette mv     <palette> <node>... --to <folder|/>  [--dry-run]
+  nwn-palette rm     <palette> <node>...              [--dry-run]
+  nwn-palette add    <palette> <folder> <resref> [--name N]  [--dry-run]
+  nwn-palette sync   <palette> [--into <folder>] [--apply]
+
+<palette> is creature|door|encounter|item|placeable|sound|store|trigger|
+waypoint. <node> is an index path ("0.3.2", as `tree` prints) or a slash
+name path ("Armor/Helmets"; a leaf also matches by resref). `sync` lists
+project blueprints missing from the palette and, with --apply, files them
+under --into (default: a top-level "Custom" folder, created if absent).
+First edit of any file writes a one-time <file>.json.bak backup.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import shutil
+import sys
+
+# palette key -> (file stem, blueprint extension, blueprint name fields)
+PALETTES = {
+    "creature":  ("creaturepalcus",  "utc", ("FirstName", "LastName")),
+    "door":      ("doorpalcus",      "utd", ("LocalizedName",)),
+    "encounter": ("encounterpalcus", "ute", ("LocalizedName",)),
+    "item":      ("itempalcus",      "uti", ("LocalizedName",)),
+    "placeable": ("placeablepalcus", "utp", ("LocalizedName",)),
+    "sound":     ("soundpalcus",     "uts", ("LocName",)),
+    "store":     ("storepalcus",     "utm", ("LocName",)),
+    "trigger":   ("triggerpalcus",   "utt", ("LocalizedName",)),
+    "waypoint":  ("waypointpalcus",  "utw", ("LocalizedName",)),
+}
+CUSTOM_FOLDER = "Custom"
+EXCLUDED_PALETTE_ID = 255
+NO_STRREF = 0xFFFFFFFF
+DEFAULT_FACTION = "Hostile"
+MAX_RESREF = 16
+
+
+class PaletteError(Exception):
+    pass
+
+
+# --- file plumbing -----------------------------------------------------------
+
+def palette_path(root, key):
+    return os.path.join(root, PALETTES[key][0] + ".itp.json")
+
+
+def available(root):
+    return [k for k in PALETTES if os.path.isfile(palette_path(root, k))]
+
+
+def load(root, key):
+    path = palette_path(root, key)
+    if key not in PALETTES or not os.path.isfile(path):
+        raise PaletteError("no %s palette in %s" % (key, root))
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save(root, key, doc):
+    """Write the palette, with a one-time .bak and an atomic replace."""
+    path = palette_path(root, key)
+    bak = path + ".bak"
+    if os.path.exists(path) and not os.path.exists(bak):
+        shutil.copy2(path, bak)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+# --- tree helpers ------------------------------------------------------------
+
+def _val(node, field, default=None):
+    f = node.get(field)
+    return f["value"] if isinstance(f, dict) and "value" in f else default
+
+
+def top(doc):
+    return doc["MAIN"]["value"]
+
+
+def is_leaf(node):
+    return "RESREF" in node
+
+
+def children(node):
+    lst = node.get("LIST")
+    return lst["value"] if lst else []
+
+
+def node_name(node, strref_text=None):
+    """Display name: NAME, legacy DELETE_ME, else the strref (resolved by
+    `strref_text(n)` when supplied) or a '(strref N)' placeholder."""
+    for field in ("NAME", "DELETE_ME"):
+        txt = _val(node, field)
+        if txt:
+            return txt
+    ref = _val(node, "STRREF")
+    if ref is not None and ref != NO_STRREF:
+        if strref_text:
+            txt = strref_text(ref)
+            if txt:
+                return txt
+        return "(strref %d)" % ref
+    return "(unnamed)"
+
+
+def walk(entries, path=(), depth=0):
+    """Yield (path tuple, node, depth) depth-first, document order."""
+    for i, node in enumerate(entries):
+        p = path + (i,)
+        yield p, node, depth
+        yield from walk(children(node), p, depth + 1)
+
+
+def path_str(path):
+    return ".".join(str(i) for i in path)
+
+
+def parse_path(text):
+    if not re.fullmatch(r"\d+(\.\d+)*", text or ""):
+        raise PaletteError("bad node path %r" % text)
+    return tuple(int(i) for i in text.split("."))
+
+
+def node_at(doc, path):
+    entries = top(doc)
+    node = None
+    for i in path:
+        if not 0 <= i < len(entries):
+            raise PaletteError("no node at %s" % path_str(path))
+        node = entries[i]
+        entries = children(node)
+    if node is None:
+        raise PaletteError("empty node path")
+    return node
+
+
+def find_node(doc, spec):
+    """Resolve an index path or a slash name path to a node."""
+    if re.fullmatch(r"\d+(\.\d+)*", spec):
+        return node_at(doc, parse_path(spec))
+    parts = [p for p in spec.split("/") if p]
+    if len(parts) == 1:
+        # a bare resref names a blueprint wherever it sits in the tree
+        for _p, n, _d in walk(top(doc)):
+            if is_leaf(n) and str(_val(n, "RESREF")).lower() == parts[0].lower():
+                return n
+    entries, node = top(doc), None
+    for part in parts:
+        want = part.lower()
+
+        def matches(n):
+            return (node_name(n).lower() == want
+                    or str(_val(n, "RESREF", "")).lower() == want)
+        # direct child first; else the first match deeper in this subtree
+        # (stock root branches are named by strref, so "Armor" rarely sits
+        # at the top level)
+        hit = next((n for n in entries if matches(n)), None) or next(
+            (n for _p, n, _d in walk(entries) if matches(n)), None)
+        if hit is None:
+            raise PaletteError("no node %r under %r" % (
+                part, node_name(node) if node else "/"))
+        node = hit
+        entries = children(node)
+    if node is None:
+        raise PaletteError("empty node spec")
+    return node
+
+
+def find_folder(doc, spec):
+    """A folder node, or None for the top level ('/' or '')."""
+    if spec in ("", "/"):
+        return None
+    node = find_node(doc, spec)
+    if is_leaf(node):
+        raise PaletteError("%r is a blueprint, not a folder" % spec)
+    return node
+
+
+def _locate(doc, node):
+    """(containing list, index) for a node, by identity."""
+    def search(entries):
+        for i, n in enumerate(entries):
+            if n is node:
+                return entries, i
+            hit = search(children(n))
+            if hit:
+                return hit
+        return None
+    hit = search(top(doc))
+    if not hit:
+        raise PaletteError("node not in this palette")
+    return hit
+
+
+def _contains(ancestor, node):
+    return any(n is node or _contains(n, node) for n in children(ancestor))
+
+
+def leaf_resrefs(doc):
+    return {str(_val(n, "RESREF")).lower() for _p, n, _d in walk(top(doc))
+            if is_leaf(n)}
+
+
+def next_id(doc):
+    ids = [_val(n, "ID") for _p, n, _d in walk(top(doc)) if "ID" in n]
+    nxt = max([i for i in ids if i is not None] + [-1]) + 1
+    if nxt > 255:
+        raise PaletteError("palette has no free folder ID left (ID is a byte)")
+    return nxt
+
+
+def _tidy(node):
+    """Drop an emptied LIST from a folder that has an ID - matches how the
+    toolset stores empty categories (ID + name, no LIST)."""
+    if "LIST" in node and not node["LIST"]["value"] and "ID" in node:
+        del node["LIST"]
+
+
+def _name_field(node, name):
+    """Give a node a custom name. NAME replaces any STRREF/DELETE_ME, since a
+    struct is named by exactly one mechanism."""
+    for stale in ("STRREF", "DELETE_ME"):
+        node.pop(stale, None)
+    node["NAME"] = {"type": "cexostring", "value": name}
+
+
+# --- operations (all mutate `doc` in place; callers save) --------------------
+
+def rename(doc, node, name):
+    name = name.strip()
+    if not name:
+        raise PaletteError("name can't be blank")
+    old = node_name(node)
+    _name_field(node, name)
+    return "renamed %r -> %r" % (old, name)
+
+
+def add_folder(doc, parent, name):
+    name = name.strip()
+    if not name:
+        raise PaletteError("folder name can't be blank")
+    if parent is not None and is_leaf(parent):
+        raise PaletteError("can't add a folder inside a blueprint")
+    new = {"__struct_id": 0, "ID": {"type": "byte", "value": next_id(doc)}}
+    _name_field(new, name)
+    _children_of(doc, parent).append(new)
+    return "added folder %r (ID %d)" % (name, new["ID"]["value"])
+
+
+def _children_of(doc, parent):
+    if parent is None:
+        return top(doc)
+    if "LIST" not in parent:
+        parent["LIST"] = {"type": "list", "value": []}
+    return parent["LIST"]["value"]
+
+
+def delete(doc, nodes):
+    gone = []
+    for node in nodes:
+        entries, i = _locate(doc, node)
+        gone.append(node_name(entries.pop(i)))
+        for _p, n, _d in walk(top(doc)):
+            _tidy(n)
+    return "removed %s" % ", ".join(repr(g) for g in gone)
+
+
+def move_by(doc, node, delta):
+    entries, i = _locate(doc, node)
+    j = i + delta
+    if not 0 <= j < len(entries):
+        raise PaletteError("%r is already at the edge" % node_name(node))
+    entries[i], entries[j] = entries[j], entries[i]
+    return "moved %r %s" % (node_name(node), "up" if delta < 0 else "down")
+
+
+def move_into(doc, nodes, target):
+    """Move nodes into folder `target` (None = top level, folders only)."""
+    for node in nodes:
+        if target is not None and (target is node or _contains(node, target)):
+            raise PaletteError("can't move %r into itself" % node_name(node))
+        if target is None and is_leaf(node):
+            raise PaletteError("blueprints can't sit at the top level")
+    for node in nodes:
+        entries, i = _locate(doc, node)
+        entries.pop(i)
+        _children_of(doc, target).append(node)
+    for _p, n, _d in walk(top(doc)):
+        _tidy(n)
+    return "moved %d node(s) into %s" % (
+        len(nodes), repr(node_name(target)) if target else "top level")
+
+
+def _blueprint_doc(root, key, resref):
+    path = os.path.join(root, "%s.%s.json" % (resref, PALETTES[key][1]))
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    return None
+
+
+def _loc_text(field):
+    v = field.get("value") if isinstance(field, dict) else None
+    if isinstance(v, dict):
+        for k, txt in v.items():
+            if k != "id" and isinstance(txt, str) and txt:
+                return txt
+    return ""
+
+
+def blueprint_name(key, bp, resref):
+    text = " ".join(t for t in (_loc_text(bp.get(f)) for f in PALETTES[key][2])
+                    if t)
+    return text or resref
+
+
+def _faction_hint(doc, parent):
+    pools = ([n for n in children(parent)] if parent is not None else []) + \
+            [n for _p, n, _d in walk(top(doc))]
+    for n in pools:
+        if is_leaf(n) and _val(n, "FACTION"):
+            return _val(n, "FACTION")
+    return DEFAULT_FACTION
+
+
+def add_blueprint(doc, key, root, parent, resref, name=None):
+    resref = resref.strip().lower()
+    if not resref or len(resref) > MAX_RESREF:
+        raise PaletteError("resref must be 1-%d characters" % MAX_RESREF)
+    if parent is None or is_leaf(parent):
+        raise PaletteError("blueprints go inside a folder")
+    bp = _blueprint_doc(root, key, resref)
+    if bp is not None and _val(bp, "PaletteID") == EXCLUDED_PALETTE_ID:
+        raise PaletteError("%s has PaletteID 255 (excluded from palettes)"
+                           % resref)
+    leaf = {"__struct_id": 0}
+    _name_field(leaf, (name or "").strip()
+                or (blueprint_name(key, bp, resref) if bp else resref))
+    leaf["RESREF"] = {"type": "resref", "value": resref}
+    if key == "creature":
+        cr = _val(bp, "ChallengeRating", 0.0) if bp else 0.0
+        leaf["CR"] = {"type": "float", "value": float(cr)}
+        leaf["FACTION"] = {"type": "cexostring",
+                           "value": _faction_hint(doc, parent)}
+    _children_of(doc, parent).append(leaf)
+    return "added %s as %r" % (resref, leaf["NAME"]["value"])
+
+
+def unlisted(root, key, doc):
+    """[(resref, display name)] of project blueprints absent from the palette."""
+    have = leaf_resrefs(doc)
+    ext = PALETTES[key][1]
+    found = []
+    for path in sorted(glob.glob(os.path.join(root, "*.%s.json" % ext))):
+        resref = os.path.basename(path)[:-len(".%s.json" % ext)].lower()
+        if resref in have:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                bp = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if _val(bp, "PaletteID") == EXCLUDED_PALETTE_ID:
+            continue
+        found.append((resref, blueprint_name(key, bp, resref)))
+    return found
+
+
+def custom_folder(doc):
+    for n in top(doc):
+        if not is_leaf(n) and node_name(n) == CUSTOM_FOLDER:
+            return n
+    return None
+
+
+def sync(doc, key, root, target=None):
+    """File every unlisted blueprint under `target` (default: the top-level
+    Custom folder, created on demand). Returns messages."""
+    missing = unlisted(root, key, doc)
+    if not missing:
+        return []
+    msgs = []
+    if target is None:
+        target = custom_folder(doc)
+        if target is None:
+            msgs.append(add_folder(doc, None, CUSTOM_FOLDER))
+            target = top(doc)[-1]
+    for resref, name in missing:
+        msgs.append(add_blueprint(doc, key, root, target, resref, name))
+    return msgs
+
+
+def validate(doc):
+    """Structural problems per the toolset's rules. Returns [str]."""
+    issues, seen = [], {}
+    for path, node, _d in walk(top(doc)):
+        where = "%s (%s)" % (path_str(path), node_name(node))
+        if "NAME" not in node and "DELETE_ME" not in node \
+                and "STRREF" not in node:
+            issues.append("%s: no NAME or STRREF" % where)
+        if is_leaf(node):
+            if "LIST" in node:
+                issues.append("%s: blueprint has a LIST" % where)
+            if len(str(_val(node, "RESREF", ""))) > MAX_RESREF:
+                issues.append("%s: RESREF longer than %d" % (where, MAX_RESREF))
+        if "DELETE_ME" in node:
+            issues.append("%s: legacy DELETE_ME (EE uses NAME)" % where)
+        if "ID" in node:
+            pid = _val(node, "ID")
+            if pid in seen:
+                issues.append("%s: ID %s already used by %s"
+                              % (where, pid, seen[pid]))
+            seen.setdefault(pid, where)
+    return issues
+
+
+# --- CLI ---------------------------------------------------------------------
+
+def _tree_lines(doc, leaves):
+    for path, node, depth in walk(top(doc)):
+        if is_leaf(node):
+            if not leaves:
+                continue
+            tail = "  [%s]" % _val(node, "RESREF")
+        else:
+            tail = "/ (%d)" % len(children(node))
+        yield "%s%-10s%s%s%s" % (
+            "", path_str(path), "  " * depth, node_name(node), tail)
+
+
+def _stats(doc):
+    nodes = [n for _p, n, _d in walk(top(doc))]
+    leaves = sum(1 for n in nodes if is_leaf(n))
+    return len(nodes) - leaves, leaves
+
+
+def _mutate(args, root, key, fn):
+    doc = load(root, key)
+    before = set(validate(doc))
+    for msg in fn(doc):
+        print(msg)
+    # Only block on problems this edit introduced - a palette that already
+    # had issues must stay editable.
+    issues = [i for i in validate(doc) if i not in before]
+    if issues:
+        raise PaletteError("refusing to save, edit would be invalid:\n  "
+                           + "\n  ".join(issues))
+    if args.dry_run:
+        print("(dry run - nothing written)")
+    else:
+        save(root, key, doc)
+
+
+def _build_parser():
+    ap = argparse.ArgumentParser(
+        prog="nwn-palette", description=__doc__.splitlines()[0])
+    ap.add_argument("--dir", default="unpacked",
+                    help="project unpacked/ directory (default: ./unpacked)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    mut = argparse.ArgumentParser(add_help=False)
+    mut.add_argument("--dry-run", action="store_true",
+                     help="show what would change, write nothing")
+    pal = argparse.ArgumentParser(add_help=False)
+    pal.add_argument("palette", choices=sorted(PALETTES))
+
+    sub.add_parser("list", help="palettes present, with folder/blueprint counts")
+    p = sub.add_parser("tree", parents=[pal], help="print the palette tree")
+    p.add_argument("--leaves", action="store_true", help="include blueprints")
+    p = sub.add_parser("check", help="validate and report unlisted blueprints")
+    p.add_argument("palette", nargs="?", choices=sorted(PALETTES))
+    p = sub.add_parser("rename", parents=[pal, mut])
+    p.add_argument("node"); p.add_argument("name")
+    p = sub.add_parser("mkdir", parents=[pal, mut])
+    p.add_argument("parent"); p.add_argument("name")
+    p = sub.add_parser("mv", parents=[pal, mut])
+    p.add_argument("node", nargs="+"); p.add_argument("--to", required=True)
+    p = sub.add_parser("rm", parents=[pal, mut])
+    p.add_argument("node", nargs="+")
+    p = sub.add_parser("add", parents=[pal, mut])
+    p.add_argument("folder"); p.add_argument("resref")
+    p.add_argument("--name")
+    p = sub.add_parser("sync", parents=[pal])
+    p.add_argument("--into"); p.add_argument("--apply", action="store_true")
+    return ap
+
+
+def _run(args):
+    root = os.path.abspath(args.dir)
+    if args.cmd == "list":
+        for key in available(root):
+            folders, leaves = _stats(load(root, key))
+            print("%-10s %4d folders %5d blueprints" % (key, folders, leaves))
+        return 0
+    if args.cmd == "check":
+        status = 0
+        for key in ([args.palette] if args.palette else available(root)):
+            doc = load(root, key)
+            issues = validate(doc)
+            missing = unlisted(root, key, doc)
+            print("%-10s %d issue(s), %d unlisted blueprint(s)"
+                  % (key, len(issues), len(missing)))
+            for i in issues:
+                print("   " + i)
+            status |= 1 if issues else 0
+        return status
+
+    key = args.palette
+    if args.cmd == "tree":
+        for line in _tree_lines(load(root, key), args.leaves):
+            print(line)
+    elif args.cmd == "rename":
+        _mutate(args, root, key, lambda d: [rename(d, find_node(d, args.node),
+                                                   args.name)])
+    elif args.cmd == "mkdir":
+        _mutate(args, root, key, lambda d: [add_folder(
+            d, find_folder(d, args.parent), args.name)])
+    elif args.cmd == "mv":
+        _mutate(args, root, key, lambda d: [move_into(
+            d, [find_node(d, s) for s in args.node],
+            find_folder(d, args.to))])
+    elif args.cmd == "rm":
+        _mutate(args, root, key, lambda d: [delete(
+            d, [find_node(d, s) for s in args.node])])
+    elif args.cmd == "add":
+        _mutate(args, root, key, lambda d: [add_blueprint(
+            d, key, root, find_folder(d, args.folder), args.resref,
+            args.name)])
+    elif args.cmd == "sync":
+        doc = load(root, key)
+        missing = unlisted(root, key, doc)
+        if not args.apply:
+            for resref, name in missing:
+                print("%-16s %s" % (resref, name))
+            print("%d unlisted (use --apply to add)" % len(missing))
+            return 0
+        if not missing:
+            print("nothing to add")
+            return 0
+        args.dry_run = False
+        _mutate(args, root, key, lambda d: sync(
+            d, key, root, find_folder(d, args.into) if args.into else None))
+    return 0
+
+
+def main(argv=None):
+    args = _build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        return _run(args)
+    except PaletteError as e:
+        print("nwn-palette: %s" % e, file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
