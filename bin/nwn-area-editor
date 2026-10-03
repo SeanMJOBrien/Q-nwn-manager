@@ -253,6 +253,8 @@ def _nav():
         links.append("<a href='%s'>Areas</a>" % purl("/areas"))
         if proj and proj.creature_count():
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+        if proj and proj.has_palettes():
+            links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
         if proj and proj.has_module():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
         links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
@@ -262,6 +264,7 @@ def _nav():
             links.append("<a href='%s'>%s</a>" % (purl("/"), esc(_slug())))
             links.append("<a href='%s'>Areas</a>" % purl("/areas"))
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+            links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
             links.append("<a href='%s'>Module</a>" % purl("/module"))
             links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
             if _has_wiki_current():
@@ -388,6 +391,10 @@ class Project:
         if not self.has_unpacked():
             return 0
         return len(glob.glob(os.path.join(self.unpacked, "*.utc.json")))
+
+    def has_palettes(self):
+        return self.has_unpacked() and bool(
+            glob.glob(os.path.join(self.unpacked, "*palcus.itp.json")))
 
     def has_module(self):
         return os.path.isfile(os.path.join(self.unpacked, "module.ifo.json"))
@@ -2871,6 +2878,241 @@ def apply_module(root, form):
     return touched
 
 
+# --- Palettes (*palcus.itp) -------------------------------------------------
+# The editing logic lives in the sibling bin/nwn-palette (shared with its CLI);
+# this section is only the HTML front end. Loaded by path, like the other
+# bin/ scripts, so it also works from the frozen nwn-pytools bundle.
+
+_PALETTE_LIB = None
+
+
+def palette_lib():
+    global _PALETTE_LIB
+    if _PALETTE_LIB is None:
+        import importlib.machinery
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "nwn-palette")
+        loader = importlib.machinery.SourceFileLoader("nwn_palette", path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        _PALETTE_LIB = importlib.util.module_from_spec(spec)
+        loader.exec_module(_PALETTE_LIB)
+    return _PALETTE_LIB
+
+
+def _strref_text(ref):
+    """Custom-TLK strrefs resolve; stock ones need dialog.tlk, not available."""
+    if ref >= CUSTOM_TLK_OFFSET:
+        return CUSTOM_TLK.get(ref - CUSTOM_TLK_OFFSET, "")
+    return ""
+
+
+def render_palettes(root):
+    pl = palette_lib()
+    rows = []
+    for key in pl.available(root):
+        doc = pl.load(root, key)
+        folders, leaves = pl._stats(doc)
+        issues = pl.validate(doc)
+        missing = len(pl.unlisted(root, key, doc))
+        rows.append(
+            "<tr><td><a href='%s'>%s</a></td><td>%s</td><td>%d</td><td>%d</td>"
+            "<td>%s</td><td>%s</td></tr>" %
+            (purl("/palette?p=" + key), esc(key.title()),
+             esc(pl.PALETTES[key][0] + ".itp"), folders, leaves,
+             ("<span class='warn'>%d</span>" % missing) if missing else "0",
+             ("<span class='err'>%d</span>" % len(issues)) if issues else "0"))
+    if not rows:
+        return page("Palettes", "<p class='err'>No *palcus.itp.json files in "
+                    "this project.</p>")
+    return page("Palettes",
+                "<table><tr><th>Palette</th><th>File</th><th>Folders</th>"
+                "<th>Blueprints</th><th>Unlisted in project</th>"
+                "<th>Issues</th></tr>%s</table>"
+                "<p class='note'>Unlisted = blueprints in this project that no "
+                "palette entry points at (so the toolset's palette doesn't show "
+                "them). Blueprints with PaletteID 255 are never counted.</p>"
+                % "".join(rows))
+
+
+def _folder_options(doc, pl, selected="", top_label=None):
+    opts = []
+    if top_label:
+        opts.append("<option value=''>%s</option>" % esc(top_label))
+    for path, node, depth in pl.walk(pl.top(doc)):
+        if pl.is_leaf(node):
+            continue
+        ps = pl.path_str(path)
+        opts.append("<option value='%s'%s>%s%s</option>" % (
+            ps, " selected" if ps == selected else "",
+            "&nbsp;&nbsp;" * depth,
+            esc(pl.node_name(node, _strref_text))))
+    return "".join(opts)
+
+
+_PALETTE_JS = """
+<script>
+function palFilter(){
+  var q = document.getElementById('palq').value.toLowerCase();
+  document.querySelectorAll('tr.pal-row').forEach(function(r){
+    r.style.display = (!q || r.textContent.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+function palNeed(n, msg){
+  var c = document.querySelectorAll('input[name=sel]:checked').length;
+  if (c < n) { alert(msg); return false; }
+  return true;
+}
+</script>
+"""
+
+
+def render_palette(root, key, msg=""):
+    pl = palette_lib()
+    if key not in pl.PALETTES:
+        return page("Unknown palette", "<p class='err'>No such palette.</p>"
+                    "<p><a href='%s'>Palettes</a></p>" % purl("/palettes"))
+    doc = pl.load(root, key)
+    rows = []
+    for path, node, depth in pl.walk(pl.top(doc)):
+        ps = pl.path_str(path)
+        leaf = pl.is_leaf(node)
+        name = pl.node_name(node, _strref_text)
+        detail = esc(pl._val(node, "RESREF", "")) if leaf else (
+            "<span class='note'>%d item(s)</span>" % len(pl.children(node)))
+        if leaf and key == "creature":
+            detail += " <span class='note'>CR %s, %s</span>" % (
+                esc(pl._val(node, "CR", "?")), esc(pl._val(node, "FACTION", "?")))
+        rows.append(
+            "<tr class='pal-row'><td><input type='checkbox' name='sel' "
+            "value='%s'></td><td style='padding-left:%.1fem'>%s %s</td>"
+            "<td>%s</td><td>%s</td></tr>" %
+            (ps, .6 + depth * 1.4, "&#9679;" if leaf else "&#128193;",
+             esc(name), detail, esc(pl._val(node, "ID", ""))))
+    issues = pl.validate(doc)
+    issue_html = ("<p class='warn'>%d structural issue(s): %s</p>" % (
+        len(issues), esc("; ".join(issues[:5])))) if issues else ""
+    msg_html = "<p class='ok'>%s</p>" % esc(msg) if msg else ""
+    missing = pl.unlisted(root, key, doc)
+
+    need1 = "return palNeed(1,'Select at least one row first.')"
+    toolbar = (
+        "<div class='sticky-toolbar'>"
+        "<input type='search' id='palq' placeholder='filter...' oninput='palFilter()'> "
+        "<span class='selected-actions'>"
+        "<button name='op' value='up' onclick=\"%(n)s\">Move up</button>"
+        "<button name='op' value='down' onclick=\"%(n)s\">Move down</button>"
+        "<button name='op' value='delete' onclick=\"return palNeed(1,'Select "
+        "at least one row first.') && confirm('Delete the selected rows and "
+        "everything inside them?')\">Delete</button></span><br>"
+        "<span class='selected-actions'>Rename selected to "
+        "<input type='text' name='name' size='24'> "
+        "<button name='op' value='rename' onclick=\"%(n)s\">Rename</button>"
+        "<button name='op' value='mkdir'>New folder inside selected "
+        "(or top level)</button></span><br>"
+        "<span class='selected-actions'>Move selected into "
+        "<select name='target'>%(opts)s</select> "
+        "<button name='op' value='move' onclick=\"%(n)s\">Move</button></span><br>"
+        "<span class='selected-actions'>Add blueprint resref "
+        "<input type='text' name='resref' size='18' maxlength='16'> "
+        "<button name='op' value='add' onclick=\"%(n)s\">Add to selected "
+        "folder</button></span></div>" %
+        {"n": need1, "opts": _folder_options(doc, pl, top_label="(top level)")})
+    main_form = (
+        "<form method='post' action='%s'><input type='hidden' name='p' "
+        "value='%s'>%s<table><tr><th></th><th>Name</th><th>Blueprint</th>"
+        "<th>ID</th></tr>%s</table></form>" %
+        (purl("/palette/apply"), esc(key), toolbar, "".join(rows)))
+
+    sync_html = ""
+    if missing:
+        pick = "".join(
+            "<tr><td><input type='checkbox' name='pick' value='%s' checked>"
+            "</td><td>%s</td><td>%s</td></tr>" % (esc(r), esc(r), esc(n))
+            for r, n in missing)
+        sync_html = (
+            "<h2>Blueprints missing from this palette (%d)</h2>"
+            "<form method='post' action='%s'><input type='hidden' name='p' "
+            "value='%s'><input type='hidden' name='op' value='sync'>"
+            "<table><tr><th></th><th>Resref</th><th>Name</th></tr>%s</table>"
+            "File into <select name='target'>%s</select> "
+            "<input type='submit' value='Add checked'></form>" %
+            (len(missing), purl("/palette/apply"), esc(key), pick,
+             _folder_options(doc, pl, top_label="Custom (top level, "
+                             "created if absent)")))
+    note = ("<p class='note'>Names shown as (strref N) are stock TLK text - "
+            "renaming one replaces it with a custom NAME. Folder IDs must stay "
+            "unique within a palette (the toolset keys on them); new folders "
+            "get the next free ID. First edit writes a .json.bak.</p>")
+    return page("Palette: %s" % key.title(),
+                "<p><a href='%s'>&larr; Palettes</a></p>%s%s%s%s%s%s" %
+                (purl("/palettes"), msg_html, issue_html, main_form,
+                 sync_html, note, _PALETTE_JS))
+
+
+def apply_palette(root, form):
+    """Run one palette edit. Returns a status message; raises PaletteError."""
+    pl = palette_lib()
+    key = form.get("p", [""])[0]
+    op = form.get("op", [""])[0]
+    if key not in pl.PALETTES:
+        raise pl.PaletteError("unknown palette")
+    doc = pl.load(root, key)
+    before = set(pl.validate(doc))
+    # Resolve every selected row to its node first - paths shift as soon as
+    # the first edit lands.
+    nodes = [pl.node_at(doc, pl.parse_path(p)) for p in form.get("sel", [])]
+    name = form.get("name", [""])[0]
+    target_s = form.get("target", [""])[0]
+    target = pl.node_at(doc, pl.parse_path(target_s)) if target_s else None
+
+    def one():
+        if len(nodes) != 1:
+            raise pl.PaletteError("select exactly one row")
+        return nodes[0]
+
+    def parent_folder():
+        if not nodes:
+            return None
+        return one()
+
+    if op == "rename":
+        msg = pl.rename(doc, one(), name)
+    elif op == "mkdir":
+        msg = pl.add_folder(doc, parent_folder(), name)
+    elif op == "delete":
+        msg = pl.delete(doc, nodes)
+    elif op in ("up", "down"):
+        msg = pl.move_by(doc, one(), -1 if op == "up" else 1)
+    elif op == "move":
+        msg = pl.move_into(doc, nodes, target)
+    elif op == "add":
+        msg = pl.add_blueprint(doc, key, root, one(),
+                               form.get("resref", [""])[0])
+    elif op == "sync":
+        picks = {r.lower() for r in form.get("pick", [])}
+        todo = [(r, n) for r, n in pl.unlisted(root, key, doc) if r in picks]
+        if not todo:
+            raise pl.PaletteError("nothing checked")
+        folder = target or pl.custom_folder(doc)
+        if folder is None:
+            pl.add_folder(doc, None, pl.CUSTOM_FOLDER)
+            folder = pl.top(doc)[-1]
+        for resref, nm in todo:
+            pl.add_blueprint(doc, key, root, folder, resref, nm)
+        msg = "added %d blueprint(s) to %r" % (
+            len(todo), pl.node_name(folder, _strref_text))
+    else:
+        raise pl.PaletteError("unknown action %r" % op)
+
+    introduced = [i for i in pl.validate(doc) if i not in before]
+    if introduced:
+        raise pl.PaletteError("edit would leave the palette invalid: "
+                              + "; ".join(introduced))
+    pl.save(root, key, doc)
+    return msg
+
+
 # --- Dashboard / project home / jobs pages ----------------------------------
 
 def upload_form_html():
@@ -3012,9 +3254,11 @@ def render_project_home(proj):
                 "scripts, lighting/fog, tags/resrefs.</p>"
                 "<p><a href='%s'>Creatures</a> - %d blueprints - stats, "
                 "feats, appearance.</p>"
+                "<p><a href='%s'>Palettes</a> - toolset palette folders and "
+                "blueprint entries (*palcus.itp).</p>"
                 "<p><a href='%s'>Module info</a> - name &amp; description.</p></div>"
                 % (purl("/areas"), n, purl("/creatures"), proj.creature_count(),
-                   purl("/module")))
+                   purl("/palettes"), purl("/module")))
 
     ingest = ("<form method='post' action='%s'>"
               "<button type='submit'>Re-ingest from source .mod</button></form>"
@@ -3262,6 +3506,11 @@ class Handler(BaseHTTPRequestHandler):
                                 % purl("/areas")), 404)
                 return
             self._send(render_instance_form(root, ares, idx, entries[idx]))
+        elif sub == "/palettes":
+            self._send(render_palettes(root))
+        elif sub == "/palette":
+            self._send(render_palette(root, query.get("p", [""])[0],
+                                      query.get("msg", [""])[0]))
         elif sub == "/module":
             if not os.path.isfile(module_ifo_path(root)):
                 self._send(page("No module.ifo",
@@ -3412,6 +3661,17 @@ class Handler(BaseHTTPRequestHandler):
                             "<p><a href='%s'>Back to placed creatures</a></p>"
                             % purl("/areas/edit?action=edit_creatures&res="
                                    + urllib.parse.quote(ares))))
+        elif sub == "/palette/apply":
+            key = form.get("p", [""])[0]
+            back = purl("/palette?p=" + urllib.parse.quote(key))
+            try:
+                msg = apply_palette(root, form)
+            except Exception as e:  # noqa: BLE001 - PaletteError, bad paths
+                self._send(page("Palette edit failed",
+                                "<p class='err'>%s</p><p><a href='%s'>Back</a></p>"
+                                % (esc(e), back)), 400)
+                return
+            self._redirect(back + "&msg=" + urllib.parse.quote(msg))
         elif sub == "/creatures/select":
             resrefs = [r for r in form.get("res", [])
                        if os.path.isfile(utc_path(root, r))]

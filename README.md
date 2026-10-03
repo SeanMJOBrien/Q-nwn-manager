@@ -112,7 +112,8 @@ today's `python3 <script>` behavior automatically when no compiled binary is
 found, so this is a pure add-on: nothing changes if you don't have one.
 
 Built from `bin/_pytools_main.py` (a small dispatcher wrapping
-`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`) via
+`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`/
+`nwn-palette`) via
 `build/nwn-pytools.spec` (PyInstaller `--onedir`). See
 `.github/workflows/build-pytools.yml` for the per-platform build; run it
 manually from the Actions tab, or build locally:
@@ -246,6 +247,33 @@ The validator is also runnable on its own against any unpacked tree:
 ```sh
 check-dlg-integrity path/to/unpacked    # exit 1 if any dialog FAILs
 ```
+
+### Toolset palettes (`nwn-manager palette`, console **Palettes** page)
+
+Edit a project's `*palcus.itp.json` palettes (the creature/item/placeable/...
+trees the toolset shows) without the toolset. The console page lists the nine
+palettes with folder/blueprint counts, **unlisted blueprints** (project
+`.utc/.uti/...` no palette entry points at) and structural issues; each
+palette page is a filterable tree where you can rename, move (up/down or into
+a folder), delete, add folders, add a blueprint by resref, and bulk-file the
+unlisted blueprints (into `Custom` by default). The CLI does the same:
+
+```sh
+nwn-manager palette list
+nwn-manager palette tree item --leaves
+nwn-manager palette check                       # issues + unlisted, all palettes
+nwn-manager palette mkdir item / "My Gear"
+nwn-manager palette mv item crn_helm1 crn_helm2 --to "My Gear"
+nwn-manager palette sync creature --apply       # file unlisted blueprints
+nwn-manager palette rename item "My Gear" "Custom Gear" --dry-run
+```
+
+Nodes are addressed by index path (`0.3.2`, as `tree` prints) or by name /
+resref. Rules enforced: every node keeps a `NAME` or `STRREF`; folder `ID`s
+stay unique per palette (new folders take the next free one); blueprints with
+`PaletteID` 255 are never filed; an edit that would introduce a new structural
+problem is refused. Renaming a stock (`STRREF`) entry swaps it for a custom
+`NAME`. The first edit of a file writes a `.json.bak`.
 
 ### Smoke tests
 

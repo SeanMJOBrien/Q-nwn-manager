@@ -59,6 +59,7 @@ python3 ~/.claude/skills/nwn-web-editor/scripts/nwn_web_editor.py \
 | areas -> Edit tags | per-area tag rename, optional resref rename (renames the .are/.git/.gic files too) |
 | `/creatures` | list .utc blueprints; per-creature editor: abilities, HP/AC/saves/CR, appearance fields, feat add/remove, names/tag |
 | `/bics` | recursive .bic browser (point at a servervault); same editor plus Experience, Gold, Age |
+| console `/palettes` | edit the toolset palettes (`*palcus.itp.json`): tree view with rename / move / delete / new folder / add blueprint, and one-click filing of project blueprints missing from a palette. Logic is in `bin/nwn-palette` (also `nwn-manager palette ...` on the CLI). Console only, not the standalone `.bic` editor |
 | `/module` | edit `module.ifo`'s Mod_Name (title) and Mod_Description together, as the toolset's Module Properties tab does |
 
 ## Area map generator (scripts/nwn_area_map.py)

@@ -79,3 +79,14 @@ scope" section this shipped against for the full reasoning.
   the same way placeables' carried items already worked; no other code
   changes were needed since `apply_remove_objects`'s dispatch was already
   generic over category.
+
+## Palettes (console + `nwn-palette`)
+
+- Stock folder/leaf names are `STRREF`s into `dialog.tlk`, which the console
+  doesn't load, so they display as `(strref N)`; only custom-TLK refs resolve.
+  Name-path addressing in the CLI therefore can't reach stock folders by name
+  (use the index path from `palette tree`).
+- Creature leaves filed by `sync`/`add` take `CR` from the `.utc` but guess
+  `FACTION` (a sibling leaf's, else `Hostile`) - the faction name lives in
+  `repute.fac`, which isn't read.
+- No undo beyond the one-time `.json.bak`.

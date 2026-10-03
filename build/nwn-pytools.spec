@@ -55,6 +55,7 @@ a = Analysis(
         (os.path.join(BIN, "nwn-area-editor"), "."),
         (os.path.join(BIN, "nwn-wiki-activity"), "."),
         (os.path.join(BIN, "check-dlg-integrity"), "."),
+        (os.path.join(BIN, "nwn-palette"), "."),
         (os.path.join(BIN, "wiki_data"), "wiki_data"),
         (os.path.join(BIN, "wiki_assets"), "wiki_assets"),
     ],

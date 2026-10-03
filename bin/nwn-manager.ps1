@@ -138,6 +138,14 @@ Usage:
                           args pass through to nwn-area-editor (--port,
                           --url-prefix, --wiki-shell, --wiki-base, --nav).
 
+  $PROG palette <list|tree|check|rename|mkdir|mv|rm|add|sync> [args...]
+                          View and edit the toolset palettes
+                          (./unpacked/*palcus.itp.json): rename/move/delete
+                          folders, add blueprints, and file blueprints the
+                          palette is missing. Mutating commands take
+                          --dry-run. Run '$PROG palette --help' for details.
+                          The same editor is in the console's Palettes page.
+
   $PROG serve --log-dir <dir> [options]
                           Monitor player activity via NWN server logs.
                           Polls every 5 minutes (configurable). When
@@ -889,6 +897,23 @@ function Invoke-CmdConsole {
     exit $LASTEXITCODE
 }
 
+function Invoke-CmdPalette {
+    param([string[]]$RestArgs)
+    $root = Find-ProjectRoot
+    if (-not $root) {
+        Write-ErrLine "error: not inside an nwn-manager project (no nasher.cfg found above $((Get-Location).Path))"
+        exit 1
+    }
+    Push-Location $root
+    try {
+        # --dir unpacked first so a user-supplied --dir later in RestArgs wins.
+        Invoke-PyTool -Sub 'palette' -RestArgs (@('--dir', 'unpacked') + @($RestArgs))
+        exit $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
+}
+
 function Invoke-CmdEditAreas {
     param([string[]]$RestArgs)
     $root = Find-ProjectRoot
@@ -1114,6 +1139,10 @@ function Invoke-Main {
         'edit-areas' {
             Invoke-Preflight @('python3')
             Invoke-CmdEditAreas -RestArgs $rest
+        }
+        'palette' {
+            Invoke-Preflight @('python3')
+            Invoke-CmdPalette -RestArgs $rest
         }
         'serve' {
             Invoke-Preflight @('python3')

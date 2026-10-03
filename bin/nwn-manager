@@ -71,7 +71,7 @@ unset _pt_plat _pt_root _pt_cand _pt_exe 2>/dev/null || true
 # fall back to running the real script under python3 (or, for the two
 # dispatcher-only lookups with no standalone script, under the dispatcher
 # source file itself). $1 = subcommand name (wiki/area-editor/wiki-activity/
-# check-dlg-integrity/hak-list/tlk-name); remaining args passed through.
+# check-dlg-integrity/palette/hak-list/tlk-name); remaining args passed through.
 run_pytool() {
   local sub=$1; shift
   if [[ -n $PYTOOLS_BIN ]]; then
@@ -140,6 +140,14 @@ Usage:
                           against ./unpacked/*.are.json (or --dir). Extra
                           args pass through to nwn-area-editor (--port,
                           --url-prefix, --wiki-shell, --wiki-base, --nav).
+
+  $PROG palette <list|tree|check|rename|mkdir|mv|rm|add|sync> [args...]
+                          View and edit the toolset palettes
+                          (./unpacked/*palcus.itp.json): rename/move/delete
+                          folders, add blueprints, and file blueprints the
+                          palette is missing. Mutating commands take
+                          --dry-run. Run '$PROG palette --help' for details.
+                          The same editor is in the console's Palettes page.
 
   $PROG serve --log-dir <dir> [options]
                           Monitor player activity via NWN server logs.
@@ -905,6 +913,17 @@ cmd_edit_areas() {
     --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
+cmd_palette() {
+  local root
+  root=$(find_project_root) || {
+    echo "error: not inside an nwn-manager project (no nasher.cfg found above $PWD)" >&2
+    exit 1
+  }
+  cd "$root"
+  # --dir unpacked first so a user-supplied --dir later in "$@" wins.
+  run_pytool palette --dir unpacked "$@"
+}
+
 cmd_serve() {
   local root
   root=$(find_project_root) || {
@@ -1076,6 +1095,10 @@ main() {
     edit-areas)
       shift; preflight python3
       cmd_edit_areas "$@"
+      ;;
+    palette)
+      shift; preflight python3
+      cmd_palette "$@"
       ;;
     serve)
       shift; preflight python3
