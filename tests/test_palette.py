@@ -10,6 +10,7 @@ Run: python3 tests/test_palette.py
 """
 import json
 import os
+import struct
 import shutil
 import tempfile
 import unittest
@@ -175,6 +176,58 @@ class PaletteTests(unittest.TestCase):
         CONSOLE.apply_palette(self.root, {"p": ["item"], "op": ["sync"],
                                           "pick": ["sword1"], "target": [""]})
         self.assertEqual(PAL.unlisted(self.root, "item", self.doc()), [])
+
+
+def write_tlk(path, texts):
+    """Minimal TLK V3.0: texts maps strref -> str (None = no text present)."""
+    count = max(texts) + 1
+    blob, entries = b"", []
+    for i in range(count):
+        t = texts.get(i)
+        data = t.encode("cp1252") if t is not None else b""
+        entries.append(struct.pack("<I16sIIIII", 1 if t is not None else 0,
+                                   b"", 0, 0, len(blob), len(data), 0))
+        blob += data
+    with open(path, "wb") as fh:
+        fh.write(b"TLK V3.0" + struct.pack("<III", 0, count, 20 + 40 * count))
+        fh.write(b"".join(entries) + blob)
+
+
+class TlkNameTests(unittest.TestCase):
+    def setUp(self):
+        self.proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.proj)
+        self.unpacked = os.path.join(self.proj, "unpacked")
+        os.makedirs(os.path.join(self.proj, "tlk"))
+        os.makedirs(self.unpacked)
+        write_tlk(os.path.join(self.proj, "tlk", "dialog.tlk"),
+                  {0: "zero", 3: "Armor", 4: None})
+        write_tlk(os.path.join(self.proj, "tlk", "mine.tlk"), {2: "Mine"})
+        with open(os.path.join(self.unpacked, "module.ifo.json"), "w") as fh:
+            json.dump({"Mod_CustomTlk": f("cexostring", "mine")}, fh)
+
+    def test_resolver_reads_dialog_and_custom(self):
+        r = PAL.make_resolver(self.proj, self.unpacked)
+        self.assertEqual(r(3), "Armor")
+        self.assertEqual(r(0x01000002), "Mine")
+        self.assertEqual(r(4), "")      # TEXT_PRESENT unset
+        self.assertEqual(r(999), "")    # out of range
+
+    def test_no_tlk_means_no_resolver(self):
+        empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty)
+        self.assertIsNone(PAL.make_resolver(empty, empty))
+
+    def test_cli_finds_stock_folder_by_resolved_name(self):
+        write = lambda d: json.dump(d, open(os.path.join(
+            self.unpacked, "itempalcus.itp.json"), "w"))
+        write(palette(folder(None, None, [folder(1, None, [], strref=3)],
+                             strref=0)))
+        self.assertEqual(PAL.main(["--dir", self.unpacked, "rename", "item",
+                                   "zero/Armor", "Gear"]), 0)
+        PAL.STRREF_RESOLVER = None
+        d = PAL.load(self.unpacked, "item")
+        self.assertEqual(PAL.node_name(PAL.node_at(d, (0, 0))), "Gear")
 
 
 if __name__ == "__main__":

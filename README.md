@@ -272,8 +272,9 @@ Nodes are addressed by index path (`0.3.2`, as `tree` prints) or by name /
 resref. Rules enforced: every node keeps a `NAME` or `STRREF`; folder `ID`s
 stay unique per palette (new folders take the next free one); blueprints with
 `PaletteID` 255 are never filed; an edit that would introduce a new structural
-problem is refused. Renaming a stock (`STRREF`) entry swaps it for a custom
-`NAME`. The first edit of a file writes a `.json.bak`.
+problem is refused. Stock (`STRREF`) entries are shown by their real names when the
+project's `tlk/dialog.tlk` is present (else `(strref N)`; override with
+`--dialog-tlk`). Renaming one swaps it for a custom `NAME`. The first edit of a file writes a `.json.bak`.
 
 ### Smoke tests
 

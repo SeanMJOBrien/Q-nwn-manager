@@ -253,7 +253,7 @@ class RemoveObjectsTests(unittest.TestCase):
     def test_render_with_no_objects_shows_empty_message(self):
         self._write_git("area_h", make_git_json())
         html = CONSOLE.render_remove_objects_form(self.tmp, self.tmp, ["area_h"])
-        self.assertIn("No placeables, creatures, or loose items found", html)
+        self.assertIn("No placeables, creatures, loose items, doors, triggers, waypoints, sounds, stores, or encounters found", html)
 
 
 # --- One live end-to-end HTTP pass -------------------------------------------

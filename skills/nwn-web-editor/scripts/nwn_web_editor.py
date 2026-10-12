@@ -739,16 +739,139 @@ def render_tags_form(root, resrefs):
             "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
             "<th>New ResRef (renames files!)</th></tr>%s</table>"
             "<p class='warn'>ResRef rename moves the .are/.git/.gic files on "
-            "disk and rewrites the ResRef field, but does NOT update door/"
-            "trigger transitions in other areas that target the old resref - "
-            "search those separately.</p>"
+            "disk, rewrites the ResRef field, and updates module.ifo's "
+            "Mod_Entry_Area / Mod_Area_list. Door and trigger transitions "
+            "target waypoint/door tags, not areas, so they are unaffected. "
+            "Scripts that quote the old tag or resref are listed after the "
+            "change but not edited.</p>"
             "<input type='submit' value='Apply'></form>" %
             (hidden_resrefs(resrefs), "".join(rows)))
     return page("Edit area tags / resrefs", body)
 
 
+# --- Reference-aware rename helpers --------------------------------------------
+# module.ifo is the only GFF data that names an area by resref
+# (Mod_Entry_Area, Mod_Area_list[].Area_Name), so a resref rename rewrites
+# those. door/trigger LinkedTo targets waypoint/door tags, never an area, so a
+# rename can't break one. A script can still quote the old tag/resref in a
+# string literal; that can't be rewritten safely, so it is only reported.
+# (Same logic as the console's nwn-area-editor, duplicated per the project's
+# between-editor convention.)
+SCRIPT_SCAN_CAP = 15
+
+
+def module_ifo_rewrites(root, renames):
+    """[(label, old, new)] module.ifo fields naming a renamed area, given
+    {old_resref: new_resref}. Read-only; [] without a module.ifo."""
+    path = os.path.join(root, "module.ifo")
+    if not renames or not os.path.isfile(path):
+        return []
+    d = gff_load(path)
+    out = []
+    entry = getv(d, "Mod_Entry_Area", "")
+    if str(entry).lower() in renames:
+        out.append(("module.ifo: Mod_Entry_Area", entry,
+                    renames[str(entry).lower()]))
+    for i, item in enumerate(getv(d, "Mod_Area_list", []) or []):
+        name = getv(item, "Area_Name", "")
+        if str(name).lower() in renames:
+            out.append(("module.ifo: Mod_Area_list[%d]" % i, name,
+                        renames[str(name).lower()]))
+    return out
+
+
+def apply_module_rewrites(root, renames):
+    path = os.path.join(root, "module.ifo")
+    d = gff_load(path)
+    n = 0
+    entry = str(getv(d, "Mod_Entry_Area", "")).lower()
+    if entry in renames:
+        setv(d, "Mod_Entry_Area", renames[entry], "resref")
+        n += 1
+    for item in getv(d, "Mod_Area_list", []) or []:
+        name = str(getv(item, "Area_Name", "")).lower()
+        if name in renames:
+            setv(item, "Area_Name", renames[name], "resref")
+            n += 1
+    if n:
+        gff_save(path, d)
+        invalidate(path)
+    return n
+
+
+def scan_script_references(root, needles):
+    """{needle: [(relpath, lineno, line)]} for quoted occurrences in .nss."""
+    needles = [n for n in dict.fromkeys(needles) if n]
+    hits = {n: [] for n in needles}
+    quoted = {n: '"%s"' % n.lower() for n in needles}
+    if not needles:
+        return hits
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for fn in sorted(files):
+            if not fn.lower().endswith(".nss"):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, encoding="cp1252", errors="replace") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            for lineno, line in enumerate(lines, 1):
+                low = line.lower()
+                for n, q in quoted.items():
+                    if q in low:
+                        hits[n].append((rel, lineno, line.strip()[:120]))
+    return hits
+
+
+def pending_rename_needles(root, form):
+    """Old tag / old resref values a submitted tags form would replace."""
+    needles = []
+    for res in form.get("res", []):
+        try:
+            d = load_cached(os.path.join(root, res + ".are"))
+        except Exception:
+            continue
+        new_tag = form.get("tag_" + res, [""])[0].strip()
+        old_tag = getv(d, "Tag") or ""
+        if new_tag and new_tag != old_tag:
+            needles.append(old_tag)
+        new_ref = form.get("ref_" + res, [""])[0].strip().lower()
+        if new_ref and new_ref != res and re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
+            needles.append(res)
+    return needles
+
+
+def render_script_scan(hits):
+    if not hits:
+        return ""
+    found = {n: h for n, h in hits.items() if h}
+    if not found:
+        return ("<p class='note'>No script here quotes the old tag/resref "
+                "(<code>.nss</code> source only - compiled-only scripts "
+                "aren't checked).</p>")
+    parts = []
+    for needle, rows in found.items():
+        shown = rows[:SCRIPT_SCAN_CAP]
+        items = "".join("<li><code>%s:%d</code> %s</li>" %
+                        (esc(f), ln, esc(text)) for f, ln, text in shown)
+        more = ("<li class='note'>+%d more</li>" % (len(rows) - len(shown))
+                if len(rows) > len(shown) else "")
+        parts.append("<p>Scripts quoting <code>\"%s\"</code> (%d):</p><ul>%s%s</ul>"
+                     % (esc(needle), len(rows), items, more))
+    return ("<div class='warn'><b>Scripts still use the old value.</b> Not "
+            "changed automatically - check whether each is really a reference "
+            "to the renamed area and update it.</div>%s" % "".join(parts))
+
+
 def apply_tags(root, form, dry_run=False):
     resrefs, changed, errors, diffs = form.get("res", []), [], [], []
+    renames = {}  # old resref -> new resref, for the module.ifo cascade
+    # Read before any file is touched - the old values are gone afterwards.
+    scan_html = "" if dry_run else render_script_scan(
+        scan_script_references(root, pending_rename_needles(root, form)))
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
@@ -766,13 +889,15 @@ def apply_tags(root, form, dry_run=False):
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
                 errors.append("%s: invalid resref %r" % (res, new_ref))
                 new_ref = ""
-            elif os.path.exists(os.path.join(root, new_ref + ".are")):
+            elif (os.path.exists(os.path.join(root, new_ref + ".are"))
+                  or new_ref in renames.values()):
                 errors.append("%s: %r already exists" % (res, new_ref))
                 new_ref = ""
         else:
             new_ref = ""
         if new_ref:
             touched = True
+            renames[res.lower()] = new_ref
             if dry_run:
                 diffs.append((res, "ResRef (renames .are/.git/.gic)",
                              res, new_ref))
@@ -789,9 +914,23 @@ def apply_tags(root, form, dry_run=False):
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(root, new_ref + ext))
                     invalidate(old_p)
+    # Cascade after the per-area writes; warn, never block, since the area
+    # rename itself has already succeeded by here.
+    try:
+        rewrites = module_ifo_rewrites(root, renames)
+        if dry_run:
+            by_new = {v: k for k, v in renames.items()}
+            diffs.extend((by_new.get(new, old), label, old, new)
+                         for label, old, new in rewrites)
+        elif rewrites:
+            apply_module_rewrites(root, renames)
+    except Exception as e:  # noqa: BLE001 - nwn_gff failures surface as CalledProcessError
+        errors.append("module.ifo could not be updated (%s) - set "
+                      "Mod_Entry_Area / Mod_Area_list to the new resref by "
+                      "hand" % e)
     if dry_run:
         return diffs, errors
-    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
+    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors) + scan_html
     return result_page("Tags updated", changed, resrefs, extra)
 
 
@@ -803,7 +942,8 @@ def result_page(title, changed, selected, extra=""):
     return page(title, body)
 
 
-def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None,
+                        extra_html=""):
     """Old -> new confirmation step shared by every bulk area editor. `form`
     is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
     what was submitted here - the real apply_* runs are unchanged; this
@@ -827,11 +967,11 @@ def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
         "area(s):</p>"
         "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
         "<th>New</th></tr>%s</table>"
-        "<form method='post' action='%s'>%s"
+        "%s<form method='post' action='%s'>%s"
         "<input type='submit' value='Confirm &amp; Apply'></form>"
         "<p><a href='/areas'>Cancel - back to areas</a></p>" %
         (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
-         rows, apply_action, hidden))
+         rows, extra_html, apply_action, hidden))
     return page(title + " - preview", body)
 
 
@@ -1504,9 +1644,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/areas/tags/preview":
                 resrefs = form.get("res", [])
                 diffs, errors = apply_tags(self.root, form, dry_run=True)
+                scan = render_script_scan(scan_script_references(
+                    self.root, pending_rename_needles(self.root, form)))
                 self._send(render_diff_preview(
                     "Edit area tags / resrefs", diffs, resrefs, form,
-                    "/areas/tags/apply", errors))
+                    "/areas/tags/apply", errors, scan))
             elif path == "/areas/scripts/apply":
                 self._send(apply_scripts(self.root, form))
             elif path == "/areas/lighting/apply":

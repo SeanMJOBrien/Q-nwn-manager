@@ -251,7 +251,7 @@ class HttpRoundTripTest(unittest.TestCase):
                        "Tileset": _field("resref", "tst"),
                        "Flags": _field("dword", 1)}, fh)
 
-        cls.port = 18394
+        cls.port = 18395
         cls._old_argv = sys.argv
         sys.argv = ["nwn-area-editor", "--dir", cls.tmp, "--git-dir", cls.tmp,
                     "--gic-dir", cls.tmp, "--host", "127.0.0.1",

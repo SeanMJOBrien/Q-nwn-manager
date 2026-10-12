@@ -171,12 +171,27 @@ input (placeholder = keep). POST `/areas/tags/preview` -> confirm -> `/areas/tag
   `.are`; on success rewrites the `ResRef` field **and** renames all three
   files (`.are/.git/.gic`) via `os.replace`.
 
-**Explicit non-goals (surfaced as an on-page warning):** a resref rename does
-NOT chase references — door/trigger `LinkedTo` transitions in other areas
-target tags, waypoint tags of the form `<TEAM>_VAULT` embed old tags, and
-`module.ifo`'s `Mod_Entry_Area` may point at the old resref. Grep the module
-after any rename. Per-area validation errors are reported inline and skip
-only the offending rename, not the whole batch.
+**Reference handling (verified scope):** door/trigger `LinkedTo` (and
+`LinkedToFlags`) target a *waypoint or door tag*, never an area resref or an
+area's own tag, so renaming an area never invalidates one. The one place GFF
+data names an area by resref is `module.ifo`: `Mod_Entry_Area` and
+`Mod_Area_list[].Area_Name`.
+- **ResRef rename cascade (both editors):** after the per-area writes, any
+  `Mod_Entry_Area` / `Mod_Area_list[i].Area_Name` equal to a renamed old resref
+  is rewritten to the new one. Each field appears as its own row in the
+  preview table (`module.ifo: Mod_Entry_Area`, `module.ifo: Mod_Area_list[i]`).
+  A batch maps each old value once (no a→b→c chaining), no module.ifo means no
+  rows, and a module.ifo read/write failure is reported as a warning without
+  undoing the area rename. Two areas claiming the same new resref in one batch
+  are rejected.
+- **Script scan (both editors, report only):** `.nss` files under the data dir
+  are searched for the old tag / old resref as a quoted string literal; matches
+  (`file:line`, capped at 15 per value with a "+N more" count) are shown on the
+  preview and the result page. Scripts are never edited, `.ncs` is not
+  inspected, and a match isn't proof of a real reference.
+Not handled: references to the old *tag* embedded in other objects' tags (e.g.
+a waypoint tagged `<TEAM>_VAULT`). Per-area validation errors are reported
+inline and skip only the offending rename, not the whole batch.
 
 ---
 
