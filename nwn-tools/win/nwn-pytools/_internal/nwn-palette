@@ -25,6 +25,7 @@ Usage:
   nwn-palette rm     <palette> <node>...              [--dry-run]
   nwn-palette add    <palette> <folder> <resref> [--name N]  [--dry-run]
   nwn-palette sync   <palette> [--into <folder>] [--apply]
+  nwn-palette undo   <palette>                        (restore previous version)
 
 <palette> is creature|door|encounter|item|placeable|sound|store|trigger|
 waypoint. <node> is an index path ("0.3.2", as `tree` prints) or a slash
@@ -33,7 +34,9 @@ project blueprints missing from the palette and, with --apply, files them
 under --into (default: a top-level "Custom" folder, created if absent).
 Stock names are strrefs; they show as text when <project>/tlk/dialog.tlk (kept
 there by `nwn-manager unpack`) or --dialog-tlk is available, else '(strref N)'.
-First edit of any file writes a one-time <file>.json.bak backup.
+First edit of any file writes a one-time <file>.json.bak backup; inside an
+nwn-manager project every edit is also snapshotted to .nwn-manager/history
+(see bin/nwn-common), which `undo` and the console's History page restore from.
 """
 
 import argparse
@@ -153,9 +156,30 @@ def load(root, key):
         return json.load(fh)
 
 
-def save(root, key, doc):
-    """Write the palette, with a one-time .bak and an atomic replace."""
+def _common():
+    """bin/nwn-common (edit history), loaded by path like the other scripts."""
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nwn-common")
+    loader = importlib.machinery.SourceFileLoader("nwn_common", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def history_root(root):
+    """Edit-history dir for the project containing `root` (its unpacked/ dir),
+    or None when that isn't an nwn-manager project."""
+    return _common().history_dir(os.path.dirname(os.path.abspath(root)))
+
+
+def save(root, key, doc, history=None):
+    """Write the palette, with a one-time .bak, an optional pre-edit history
+    snapshot (`history` = a history dir), and an atomic replace."""
     path = palette_path(root, key)
+    if history:
+        _common().snapshot(path, history)
     bak = path + ".bak"
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -549,7 +573,7 @@ def _mutate(args, root, key, fn):
     if args.dry_run:
         print("(dry run - nothing written)")
     else:
-        save(root, key, doc)
+        save(root, key, doc, history_root(root))
 
 
 def _build_parser():
@@ -583,6 +607,9 @@ def _build_parser():
     p = sub.add_parser("add", parents=[pal, mut])
     p.add_argument("folder"); p.add_argument("resref")
     p.add_argument("--name")
+    p = sub.add_parser("undo", parents=[pal],
+                       help="restore the palette from its newest history "
+                            "snapshot (undoes the last edit)")
     p = sub.add_parser("sync", parents=[pal])
     p.add_argument("--into"); p.add_argument("--apply", action="store_true")
     return ap
@@ -612,7 +639,20 @@ def _run(args):
         return status
 
     key = args.palette
-    if args.cmd == "tree":
+    if args.cmd == "undo":
+        hist = history_root(root)
+        if not hist:
+            raise PaletteError("no edit history: %s isn't inside an "
+                               "nwn-manager project (no nasher.cfg)" % root)
+        com = _common()
+        want = os.path.abspath(palette_path(root, key))
+        mine = [e for e in com.list_history(hist) if e["path"] == want]
+        if not mine:
+            raise PaletteError("no history recorded for the %s palette" % key)
+        com.restore(hist, mine[0]["key"], mine[0]["stamp"])
+        print("restored %s palette from %s UTC" % (
+            key, mine[0]["stamp"].replace("T", " ")))
+    elif args.cmd == "tree":
         for line in _tree_lines(load(root, key), args.leaves):
             print(line)
     elif args.cmd == "rename":

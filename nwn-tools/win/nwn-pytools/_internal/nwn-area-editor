@@ -72,6 +72,40 @@ SERVER = None           # the ThreadingHTTPServer (for the /shutdown "Stop" butt
 _req = threading.local()
 
 
+def _load_sibling(name):
+    """Load a sibling bin/ script (no .py extension) by path - the same
+    technique _pytools_main.py uses, so it also works frozen."""
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+_COMMON = None
+
+
+def common():
+    """bin/nwn-common: CSRF guard, stale-edit check, edit history."""
+    global _COMMON
+    if _COMMON is None:
+        _COMMON = _load_sibling("nwn-common")
+    return _COMMON
+
+
+_CSRF_GUARD = None
+
+
+def csrf_guard():
+    global _CSRF_GUARD
+    if _CSRF_GUARD is None:
+        _CSRF_GUARD = common().CsrfGuard()
+    return _CSRF_GUARD
+
+
 def _slug():
     return getattr(_req, "slug", None)
 
@@ -104,8 +138,27 @@ def json_load(path):
         return json.load(fh)
 
 
+def guard_write(path):
+    """Run before overwriting a file in an editor request: refuse if it
+    changed after the submitting form was rendered, then snapshot the current
+    contents into the project's history (undo). Outside a request (tests,
+    scripts) both checks are skipped."""
+    com = common()
+    full = os.path.abspath(path)
+    com.check_stale(full, getattr(_req, "rendered", None),
+                    getattr(_req, "written", ()))
+    proj = getattr(_req, "project", None)
+    hist = com.history_dir(proj.root) if proj else None
+    if hist:
+        com.snapshot(full, hist)
+    written = getattr(_req, "written", None)
+    if written is not None:
+        written.add(full)
+
+
 def json_save(path, data):
     """Write GFF-as-JSON, with one-time .bak backup and atomic replace."""
+    guard_write(path)
     bak = path + ".bak"
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -257,6 +310,8 @@ def _nav():
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
         if proj and proj.has_module():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+        if proj and proj.history_dir():
+            links.append("<a href='%s'>History</a>" % purl("/history"))
         links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
     else:
         links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
@@ -266,6 +321,7 @@ def _nav():
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+            links.append("<a href='%s'>History</a>" % purl("/history"))
             links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
             if _has_wiki_current():
                 links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
@@ -391,6 +447,9 @@ class Project:
         if not self.has_unpacked():
             return 0
         return len(glob.glob(os.path.join(self.unpacked, "*.utc.json")))
+
+    def history_dir(self):
+        return common().history_dir(self.root)
 
     def has_palettes(self):
         return self.has_unpacked() and bool(
@@ -1149,13 +1208,71 @@ def render_script_scan(hits):
             "</div>%s" % "".join(parts))
 
 
+EMBED_MIN_LEN = 3        # shorter needles would match too much to be useful
+EMBED_SCAN_CAP = 15
+
+
+def scan_embedded_tags(git_root, needles):
+    """Placed objects whose Tag contains an old area tag/resref as a whole
+    word (so 'town' matches 'TOWN_VAULT' but not 'downtown'). Returns
+    {needle: [(area resref, category, tag)]}. Report-only: a tag that merely
+    resembles an area's is not proof it is meant to track it."""
+    needles = [n for n in dict.fromkeys(needles) if len(n) >= EMBED_MIN_LEN]
+    hits = {n: [] for n in needles}
+    if not needles:
+        return hits
+    pats = {n: re.compile(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(n),
+                          re.I) for n in needles}
+    for gp in sorted(glob.glob(os.path.join(git_root, "*.git.json"))):
+        try:
+            g = load_cached(gp)
+        except (OSError, ValueError):
+            continue
+        area = os.path.basename(gp)[:-len(".git.json")]
+        for category, field in OBJECT_LIST_FIELDS.items():
+            for entry in getv(g, field, []) or []:
+                tag = getv(entry, "Tag", "")
+                if not tag:
+                    continue
+                for n, pat in pats.items():
+                    if pat.search(tag):
+                        hits[n].append((area, category, tag))
+    return hits
+
+
+def render_embedded_tags(hits):
+    found = {n: h for n, h in hits.items() if h}
+    if not found:
+        return ""
+    parts = []
+    for needle, rows in found.items():
+        shown = rows[:EMBED_SCAN_CAP]
+        items = "".join("<li><code>%s</code> %s tag <code>%s</code></li>"
+                        % (esc(a), esc(c), esc(t)) for a, c, t in shown)
+        more = ("<li class='note'>+%d more</li>" % (len(rows) - len(shown))
+                if len(rows) > len(shown) else "")
+        parts.append("<p>Object tags containing <code>%s</code> (%d):</p>"
+                     "<ul>%s%s</ul>" % (esc(needle), len(rows), items, more))
+    return ("<div class='warn'><b>Some placed objects have tags that embed the "
+            "old value.</b> Not changed automatically - if a script builds "
+            "these tags from the area's tag or resref, they need renaming "
+            "too.</div>%s" % "".join(parts))
+
+
+def render_rename_scans(root, git_root, form):
+    """Both read-only reports for a submitted tags form: scripts quoting the
+    old value, and placed objects whose tags embed it."""
+    needles = pending_rename_needles(root, form)
+    return (render_script_scan(scan_script_references(root, needles))
+            + render_embedded_tags(scan_embedded_tags(git_root, needles)))
+
+
 def apply_tags(root, git_root, gic_root, form, dry_run=False):
     resrefs, changed, errors, diffs = form.get("res", []), [], [], []
     renames = {}  # old resref -> new resref, for the module.ifo cascade
     # Read before any file is touched: after the rename the old tag/resref
     # is no longer on disk to look up.
-    scan_html = "" if dry_run else render_script_scan(
-        scan_script_references(root, pending_rename_needles(root, form)))
+    scan_html = "" if dry_run else render_rename_scans(root, git_root, form)
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -3042,14 +3159,7 @@ _PALETTE_LIB = None
 def palette_lib():
     global _PALETTE_LIB
     if _PALETTE_LIB is None:
-        import importlib.machinery
-        import importlib.util
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "nwn-palette")
-        loader = importlib.machinery.SourceFileLoader("nwn_palette", path)
-        spec = importlib.util.spec_from_loader(loader.name, loader)
-        _PALETTE_LIB = importlib.util.module_from_spec(spec)
-        loader.exec_module(_PALETTE_LIB)
+        _PALETTE_LIB = _load_sibling("nwn-palette")
     return _PALETTE_LIB
 
 
@@ -3290,8 +3400,66 @@ def apply_palette(root, form):
     if introduced:
         raise pl.PaletteError("edit would leave the palette invalid: "
                               + "; ".join(introduced))
+    guard_write(pl.palette_path(root, key))
     pl.save(root, key, doc)
     return msg
+
+
+# --- Edit history (undo) ------------------------------------------------------
+
+def render_history(proj, msg=""):
+    com = common()
+    hist = proj.history_dir()
+    if not hist:
+        return page("Edit history",
+                    "<p class='note'>History is kept for nwn-manager projects "
+                    "(a folder with a nasher.cfg); this directory isn't one, "
+                    "so only the one-time <code>.bak</code> copies exist.</p>")
+    entries = com.list_history(hist)[:200]
+    rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%d KB</td><td>%s</td><td>"
+        "<form method='post' action='%s'><input type='hidden' name='key' "
+        "value='%s'><input type='hidden' name='stamp' value='%s'>"
+        "<button onclick=\"return confirm('Restore this version? The current "
+        "file is saved to history first.')\">Restore</button></form></td></tr>"
+        % (esc(e["name"]), esc(e["stamp"].replace("T", " ")),
+           max(1, e["size"] // 1024),
+           "" if e["exists"] else "<span class='warn'>file no longer at this "
+           "path (renamed?) - restore recreates it</span>",
+           purl("/history/restore"), esc(e["key"]), esc(e["stamp"]))
+        for e in entries)
+    table = ("<table><tr><th>File</th><th>Saved (UTC, before the edit)</th>"
+             "<th>Size</th><th></th><th></th></tr>%s</table>" % rows
+             if rows else "<p class='note'>No edits recorded yet.</p>")
+    return page("Edit history",
+                "%s<p class='note'>Every edit made through the console or "
+                "<code>nwn-manager palette</code> first copies the file's "
+                "previous contents here (last %d versions per file, newest "
+                "200 shown). Stored under <code>.nwn-manager/history</code>, "
+                "which is gitignored.</p>%s" %
+                ("<p class='ok'>%s</p>" % esc(msg) if msg else "",
+                 com.KEEP_PER_FILE, table))
+
+
+def apply_history_restore(proj, form):
+    com = common()
+    hist = proj.history_dir()
+    if not hist:
+        raise ValueError("no history for this directory")
+    key = form.get("key", [""])[0]
+    stamp = form.get("stamp", [""])[0]
+    # Same stale/history guards as an edit: the restore must not clobber a
+    # file changed since the history page was rendered.
+    folder = os.path.join(hist, key)
+    try:
+        with open(os.path.join(folder, "path.txt"), encoding="utf-8") as fh:
+            orig = fh.read().strip()
+    except OSError:
+        raise ValueError("unknown history entry")
+    guard_write(orig)
+    target = com.restore(hist, key, stamp)
+    invalidate(target)
+    return "restored %s" % os.path.basename(target)
 
 
 # --- Dashboard / project home / jobs pages ----------------------------------
@@ -3516,12 +3684,20 @@ class Handler(BaseHTTPRequestHandler):
             return path[len(self.url_prefix):] or "/"
         return path
 
-    def _send(self, content, code=200):
+    def _send(self, content, code=200, inject=True):
+        # Every POST form on a page gets the CSRF token + render time. The
+        # start page is excluded: it builds forms in JS strings and is also
+        # served from file:// where it has no session (its routes are exempt).
+        sid = getattr(_req, "sid", "")
+        if inject and sid:
+            content = csrf_guard().inject(content, sid)
         data = content.encode()
         try:
             self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            if getattr(_req, "new_sid", False):
+                self.send_header("Set-Cookie", common().CsrfGuard.cookie_header(sid))
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -3564,9 +3740,40 @@ class Handler(BaseHTTPRequestHandler):
             self._client_gone()
 
     def _form(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return urllib.parse.parse_qs(self.rfile.read(length).decode(),
-                                     keep_blank_values=True)
+        # Memoised: the body can only be read once, and do_POST reads it for
+        # CSRF verification before the route handlers ask for it again.
+        if getattr(self, "_form_cache", None) is None:
+            length = int(self.headers.get("Content-Length", 0))
+            self._form_cache = urllib.parse.parse_qs(
+                self.rfile.read(length).decode(), keep_blank_values=True)
+        return self._form_cache
+
+    def _begin(self):
+        """Reset per-request context; pick up or mint the session id."""
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        _req.rendered = None
+        _req.written = set()
+        com = common()
+        sid = com.CsrfGuard.sid_from_cookie(self.headers.get("Cookie"))
+        _req.new_sid = not sid
+        _req.sid = sid or csrf_guard().new_sid()
+        self._form_cache = None
+
+    # Routes the standalone start.html (opened from file://, so no session)
+    # posts to. They create projects or stop the console; none edits module
+    # data, which is what the token protects.
+    CSRF_EXEMPT = ("/shutdown", "/projects/new", "/projects/ingest-root")
+
+    def _csrf_ok(self, path):
+        if path in self.CSRF_EXEMPT:
+            return True
+        form = self._form()
+        sid = common().CsrfGuard.sid_from_cookie(self.headers.get("Cookie"))
+        tokens = form.get(common().FIELD_CSRF, [])
+        _req.rendered = common().rendered_from_form(form)
+        return any(csrf_guard().verify(sid, t) for t in tokens)
 
     def log_message(self, fmt, *args):  # quieter default log
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -3580,9 +3787,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
-        _req.proxy = self.url_prefix
-        _req.slug = None
-        _req.project = None
+        self._begin()
         raw = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(raw.query)
         path = self._strip_proxy(raw.path)
@@ -3594,7 +3799,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/":
                 self._send(render_dashboard())
             elif path == "/start":
-                self._send(render_start())
+                self._send(render_start(), inject=False)
             elif path == "/api/root-mods":
                 # Consumed by start.html's JS; CORS-open so the page works even
                 # when opened directly as a file:// document.
@@ -3687,6 +3892,8 @@ class Handler(BaseHTTPRequestHandler):
                                 % purl("/areas")), 404)
                 return
             self._send(render_instance_form(root, ares, idx, entries[idx]))
+        elif sub == "/history":
+            self._send(render_history(proj, query.get("msg", [""])[0]))
         elif sub == "/palettes":
             self._send(render_palettes(root))
         elif sub == "/palette":
@@ -3709,12 +3916,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST ---------------------------------------------------------------
     def do_POST(self):
-        _req.proxy = self.url_prefix
-        _req.slug = None
-        _req.project = None
+        self._begin()
         raw = urllib.parse.urlparse(self.path)
         path = self._strip_proxy(raw.path)
         try:
+            if not self._csrf_ok(path):
+                self._send(page("Request rejected",
+                                "<p class='err'>This form's security token is "
+                                "missing or expired (the console was "
+                                "restarted, or the request didn't come from "
+                                "one of its pages). Reload the page and try "
+                                "again.</p>"), 403)
+                return
             if path == "/shutdown":
                 self._shutdown()
                 return
@@ -3740,6 +3953,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._project_post(proj, sub, None)
                 return
             self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except common().StaleEditError as e:
+            self._send(page("Edit conflict", "<p class='err'>%s</p>" % esc(e)), 409)
         except Exception as e:  # noqa: BLE001
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
@@ -3791,8 +4006,7 @@ class Handler(BaseHTTPRequestHandler):
             resrefs = form.get("res", [])
             diffs, errors = apply_tags(root, proj.git_root, proj.gic_root,
                                        form, dry_run=True)
-            scan = render_script_scan(scan_script_references(
-                root, pending_rename_needles(root, form)))
+            scan = render_rename_scans(root, proj.git_root, form)
             self._send(render_diff_preview(
                 "Edit area names / tags / resrefs", diffs, resrefs, form,
                 purl("/areas/tags/apply"), errors, scan))
@@ -3844,15 +4058,27 @@ class Handler(BaseHTTPRequestHandler):
                             "<p><a href='%s'>Back to placed creatures</a></p>"
                             % purl("/areas/edit?action=edit_creatures&res="
                                    + urllib.parse.quote(ares))))
+        elif sub == "/history/restore":
+            try:
+                msg = apply_history_restore(proj, form)
+            except common().StaleEditError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self._send(page("Restore failed",
+                                "<p class='err'>%s</p><p><a href='%s'>Back</a></p>"
+                                % (esc(e), purl("/history"))), 400)
+                return
+            self._redirect(purl("/history?msg=" + urllib.parse.quote(msg)))
         elif sub == "/palette/apply":
             key = form.get("p", [""])[0]
             back = purl("/palette?p=" + urllib.parse.quote(key))
             try:
                 msg = apply_palette(root, form)
             except Exception as e:  # noqa: BLE001 - PaletteError, bad paths
-                self._send(page("Palette edit failed",
+                stale = isinstance(e, common().StaleEditError)
+                self._send(page("Edit conflict" if stale else "Palette edit failed",
                                 "<p class='err'>%s</p><p><a href='%s'>Back</a></p>"
-                                % (esc(e), back)), 400)
+                                % (esc(e), back)), 409 if stale else 400)
                 return
             self._redirect(back + "&msg=" + urllib.parse.quote(msg))
         elif sub == "/creatures/select":
