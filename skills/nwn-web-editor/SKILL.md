@@ -45,6 +45,10 @@ python3 ~/.claude/skills/nwn-web-editor/scripts/nwn_web_editor.py \
   lighting/tags/scripts forms for that area. Regenerate the wiki, then
   restart the editor so it picks up the fresh shell.
 - First edit of any file writes a one-time sibling `<file>.bak` backup.
+- Every POST form carries a CSRF token (session cookie + HMAC), and a save is
+  refused (409) if the file changed after the form was rendered - reload and
+  redo. Scripts POSTing with `curl` must GET a page first and send its `_csrf`
+  field. The console additionally keeps an undo history (see the README).
 - Full per-feature behavior spec: `references/feature-specs.md` — read it
   before extending the app or diagnosing unexpected behavior.
 

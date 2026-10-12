@@ -27,6 +27,9 @@ import urllib.request
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from csrf_client import Client  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONSOLE = SourceFileLoader(
     "nwn_area_editor_under_test__test_module_settings",
@@ -278,15 +281,17 @@ class HttpRoundTripTest(unittest.TestCase):
             pass
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
+    @classmethod
+    def _client(cls):
+        if "_c" not in cls.__dict__:  # one browser session per test class
+            cls._c = Client(cls.port)
+        return cls._c
+
     def _get(self, path):
-        return urllib.request.urlopen(
-            "http://127.0.0.1:%d%s" % (self.port, path), timeout=5).read().decode()
+        return self._client().get(path)
 
     def _post(self, path, data):
-        body = urllib.parse.urlencode(data, doseq=True).encode()
-        return urllib.request.urlopen(
-            "http://127.0.0.1:%d%s" % (self.port, path), data=body,
-            timeout=5).read().decode()
+        return self._client().post(path, data)
 
     def test_full_http_round_trip(self):
         form_html = self._get("/module")

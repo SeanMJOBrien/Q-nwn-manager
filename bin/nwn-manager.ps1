@@ -474,6 +474,7 @@ function Invoke-CmdInit {
 /.nasher/
 /dist/
 /tlk/
+/.nwn-manager/
 *.mod
 *.ncs
 *.erf
@@ -555,6 +556,7 @@ function Invoke-CmdUnpack {
         if ($LASTEXITCODE -ne 0) { throw "nasher unpack failed (exit $LASTEXITCODE)" }
 
         Add-GitignoreEntry '/tlk/'
+        Add-GitignoreEntry '/.nwn-manager/'
         Export-Tlks
 
         Show-UnpackedSummary

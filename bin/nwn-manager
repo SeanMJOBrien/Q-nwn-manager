@@ -461,6 +461,7 @@ cmd_init() {
 /.nasher/
 /dist/
 /tlk/
+/.nwn-manager/
 *.mod
 *.ncs
 *.erf
@@ -535,6 +536,7 @@ cmd_unpack() {
   nasher unpack --yes --file:"$clean_mod"
 
   ensure_gitignore_entry "/tlk/"
+  ensure_gitignore_entry "/.nwn-manager/"
   extract_tlks
 
   print_unpacked_summary

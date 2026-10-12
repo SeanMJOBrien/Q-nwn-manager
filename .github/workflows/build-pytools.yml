@@ -22,6 +22,7 @@ on:
       - "bin/nwn-wiki-activity"
       - "bin/check-dlg-integrity"
       - "bin/nwn-palette"
+      - "bin/nwn-common"
       - "bin/wiki_data/**"
       - "bin/wiki_assets/**"
       - "build/nwn-pytools.spec"

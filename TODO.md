@@ -113,50 +113,58 @@ contrary to the plan's first draft). Deferred / limits:
 
 ## Improvement backlog (from a post-palette review)
 
-Ideas surfaced after the palette and reference-aware-rename work. Items marked
-*(unchecked)* are leads from skimming, not verified problems.
+Status of the ideas surfaced after the palette and reference-aware-rename
+work. Items marked *(unchecked)* are leads from skimming, not verified.
 
 ### Safety
 
-- **No CSRF protection on state-changing POSTs.** The editors bind 127.0.0.1,
-  but the docs describe a reverse-proxy deployment (`--url-prefix`, Apache with
-  basic auth). A per-session token (`secrets.token_hex`, compared with
-  `hmac.compare_digest`) on every apply/preview form would close it. Highest
-  priority if the console is ever reachable by anyone else.
-- **No write-time conflict check.** Every editor reads, edits and writes a whole
-  file; two tabs, or the console plus a `nasher` unpack, silently overwrite each
-  other. Cheap fix: record the file's mtime when a form is rendered and refuse
-  the apply if it changed.
-- **No undo beyond the one-time `.bak`.** The second edit to a file has nothing
-  to go back to. Options: timestamped backups under a per-project history dir,
-  or a "restore from .bak" action. Matters more now that palette edits are
-  structural.
-- **Palette output unverified against the toolset.** Edited palettes have never
-  been loaded into the toolset. Do that once on a real module, and extend
-  `palette check` with whatever the toolset turns out to reject.
-- **Tag-embedded references on area rename.** Waypoint/object tags that embed
-  the old area tag (e.g. `<TEAM>_VAULT`) are still not rewritten; only module.ifo
-  and the script scan landed (see "Reference-aware area rename").
+- ~~No CSRF protection on state-changing POSTs~~ - done in the console and the
+  standalone editor: session cookie (`SameSite=Strict`) + per-session HMAC token
+  injected into every POST form, verified in `do_POST`. Exempt: `/shutdown`,
+  `/projects/new`, `/projects/ingest-root` (the standalone `start.html` posts
+  to them from `file://`, where no session exists - they only create projects or
+  stop the console). Residual: scripts using `curl` must fetch a token first.
+- ~~No write-time conflict check~~ - done: forms carry their render time and
+  `json_save` / `gff_save` refuse (409) when the file's mtime is newer. Limits:
+  based on filesystem mtime, so a same-millisecond change is missed, and a
+  rename (os.replace of an area's files) isn't covered by the check.
+- ~~No undo beyond the one-time `.bak`~~ - done for the console and
+  `nwn-palette` (`bin/nwn-common`: last 10 snapshots per file in
+  `.nwn-manager/history/`, History page, `palette undo`). Not done: the
+  standalone editor (`.bak` only - it is installed as a standalone skill and
+  can't import repo code), and restoring *renamed/removed* files is by original
+  path only. History is only kept for folders containing a `nasher.cfg`.
+- **Palette output unverified against the toolset.** Still open - it needs the
+  NWN toolset, which can't be run from here. Load an edited palette once on a
+  real module, then extend `palette check` with whatever it rejects.
+- ~~Tag-embedded references on area rename~~ - detect-only report added (console
+  only): placed-object tags containing the old area tag/resref as a whole word.
+  Not rewritten automatically (a similar-looking tag isn't proof it tracks the
+  area), and not in the standalone editor (its `.git` files are binary GFF).
 
 ### Efficiency / maintainability
 
-- **Shared editor module.** The console and the standalone web editor duplicate
-  the GFF helpers and the `apply_*` functions (see "Editor capability
-  divergence"); the rename cascade and script scan were written twice. Extract
-  the shared logic into one module both import, the way `bin/nwn-palette`
-  already is.
-- **Page-load cost on big projects** *(unchecked)*. Areas/Creatures reparse many
-  JSON files on first load (an 8,000-file project exists locally). The mtime
-  cache works, but measure before optimising.
-- **Stray repo-root files** *(unchecked)*. `bin/__pycache__/*.pyc` and loose
-  `.2da`/`.uti`/`.json` files in the repo root look accidental.
+- **Shared editor module** - partly done: the safety logic lives in
+  `bin/nwn-common`, shared by the console and `nwn-palette`. The console and the
+  standalone editor still duplicate the GFF helpers and `apply_*` functions, and
+  that can't be fixed by importing: the standalone is installed on its own as a
+  skill, so it carries its own copies (CSRF, stale check, rename helpers).
+- ~~Page-load cost on big projects~~ - measured on the 2,518-area project:
+  Areas 2.5 s cold / 0.04 s warm, area map read 3.2 s cold / 0.06 s warm. Cold
+  cost is pure JSON parsing (~1 ms per file), paid once per server run and then
+  served from the mtime cache. Not worth a persistent cache and its invalidation
+  risk; revisit only if cold starts on bigger projects become a complaint.
+- ~~Stray repo files~~ - removed the tracked `bin/__pycache__/*.pyc`
+  (`__pycache__/` was already gitignored). Left for the owner to decide, as they
+  are committed and unreferenced by the code: `orcplate002.uti`,
+  `parts_chest.2da`, `ruleset.2da`, `tagged_versions.json` and the three dated
+  `*.txt` session logs in the repo root.
 
-### New features
+### New features (not started)
 
 - **Cross-reference report.** "Where is this blueprint / tag / resref used?"
-  across areas, dialogs, scripts and palettes. The rename script scan is a
-  starting point; `nwn-mcp` has `find_orphans` / `find_variable_usage` for
-  comparison.
+  across areas, dialogs, scripts and palettes. The rename scans are a starting
+  point; `nwn-mcp` has `find_orphans` / `find_variable_usage` for comparison.
 - **Generic blueprint scalar editor** for `.uti`/`.utp`/`.utd`/`.utt`/`.utm`/
   `.ute` with a preview step (the gap noted under "Other NWN file types").
 - **Palette extras:** drag-and-drop reordering, collapsible folders, and an

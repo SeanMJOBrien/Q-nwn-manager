@@ -161,6 +161,37 @@ class RenameRefsTests(unittest.TestCase):
             CONSOLE.scan_script_references(self.tmp, ["atag"]))
         self.assertIn("No script", html)
 
+    # --- tags that embed the old area tag/resref ------------------------
+
+    def write_git(self, res, **lists):
+        d = {"__data_type": "GIT "}
+        for field, tags in lists.items():
+            d[field] = f("list", [{"__struct_id": 1, "Tag": f("cexostring", t)}
+                                  for t in tags])
+        with open(os.path.join(self.tmp, res + ".git.json"), "w") as fh:
+            json.dump(d, fh)
+
+    def test_embedded_tag_scan_matches_whole_words_only(self):
+        self.write_git("other", WaypointList=["ATAG_VAULT", "downatag",
+                                              "atagonist", "ATAG", "x_atag_y"],
+                       TriggerList=["Door_ATAG"])
+        hits = CONSOLE.scan_embedded_tags(self.tmp, ["atag"])["atag"]
+        self.assertEqual(sorted(t for _a, _c, t in hits),
+                         ["ATAG", "ATAG_VAULT", "Door_ATAG", "x_atag_y"])
+        self.assertEqual({c for _a, c, _t in hits}, {"waypoint", "trigger"})
+
+    def test_embedded_tag_scan_skips_very_short_needles(self):
+        self.write_git("other", WaypointList=["go", "GO_HOME"])
+        self.assertEqual(CONSOLE.scan_embedded_tags(self.tmp, ["go"]), {})
+
+    def test_rename_result_reports_embedded_tags_without_editing(self):
+        self.write_git("other", WaypointList=["ATAG_VAULT"])
+        before = open(os.path.join(self.tmp, "other.git.json")).read()
+        page = self.apply({"res": ["old1"], "tag_old1": ["newtag"]})
+        self.assertIn("ATAG_VAULT", page)
+        self.assertEqual(open(os.path.join(self.tmp, "other.git.json")).read(),
+                         before)
+
 
 if __name__ == "__main__":
     unittest.main()

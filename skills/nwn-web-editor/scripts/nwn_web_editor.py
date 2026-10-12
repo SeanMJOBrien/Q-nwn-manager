@@ -26,15 +26,20 @@ Usage:
 import argparse
 import copy
 import fnmatch
+import hashlib
+import hmac
 import html
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -71,8 +76,66 @@ def gff_load(path):
         os.unlink(tmp)
 
 
+# --- Request safety: CSRF token + stale-edit check --------------------------------
+# Self-contained copy of the logic in the repo's bin/nwn-common (this script is
+# installed as a standalone skill and can't import it). Every POST form gets a
+# token tied to a SameSite=Strict session cookie, plus the time the page was
+# rendered; gff_save refuses to overwrite a file modified after that time.
+
+_SECRET = secrets.token_bytes(32)
+_req = threading.local()
+COOKIE_NAME = "qnm_sid"
+
+
+class StaleEditError(Exception):
+    pass
+
+
+def csrf_token(sid):
+    return hmac.new(_SECRET, sid.encode(), hashlib.sha256).hexdigest()
+
+
+def sid_from_cookie(header):
+    for part in (header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE_NAME and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    return ""
+
+
+def inject_csrf(content, sid):
+    hidden = ("<input type='hidden' name='_csrf' value='%s'>"
+              "<input type='hidden' name='_rendered' value='%.6f'>"
+              % (csrf_token(sid), time.time()))
+    return re.sub(r"(<form\b[^>]*\bmethod=['\"]post['\"][^>]*>)",
+                  lambda m: m.group(1) + hidden, content, flags=re.I)
+
+
+def rendered_from_form(form):
+    vals = []
+    for v in form.get("_rendered", []):
+        try:
+            vals.append(float(v))
+        except ValueError:
+            pass
+    return min(vals) if vals else None
+
+
+def check_stale(path):
+    rendered = getattr(_req, "rendered", None)
+    if rendered is None or os.path.abspath(path) in getattr(_req, "written", ()):
+        return
+    if os.path.exists(path) and os.path.getmtime(path) > rendered:
+        raise StaleEditError(
+            "%s changed on disk after this page was loaded (another tab or "
+            "tool). Reload the page and redo the edit so nothing is "
+            "overwritten." % os.path.basename(path))
+
+
 def gff_save(path, data):
     """JSON dict -> GFF binary, with one-time .bak backup and atomic replace."""
+    check_stale(path)
+    getattr(_req, "written", set()).add(os.path.abspath(path))
     bak = path + ".bak"
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -1520,7 +1583,16 @@ class Handler(BaseHTTPRequestHandler):
             path = path[len(self.url_prefix):] or "/"
         return path
 
+    def _begin(self):
+        _req.rendered = None
+        _req.written = set()
+        sid = sid_from_cookie(self.headers.get("Cookie"))
+        _req.new_sid = not sid
+        _req.sid = sid or secrets.token_hex(16)
+        self._form_cache = None
+
     def _send(self, content, code=200):
+        content = inject_csrf(content, _req.sid)
         if self.url_prefix:
             # every internal URL in the app is a single-quoted absolute path
             content = (content
@@ -1530,18 +1602,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if _req.new_sid:
+            self.send_header("Set-Cookie", "%s=%s; Path=/; HttpOnly; "
+                             "SameSite=Strict" % (COOKIE_NAME, _req.sid))
         self.end_headers()
         self.wfile.write(data)
 
     def _form(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return urllib.parse.parse_qs(self.rfile.read(length).decode(),
-                                     keep_blank_values=True)
+        # Memoised: the body can only be read once and do_POST reads it first
+        # to verify the CSRF token.
+        if getattr(self, "_form_cache", None) is None:
+            length = int(self.headers.get("Content-Length", 0))
+            self._form_cache = urllib.parse.parse_qs(
+                self.rfile.read(length).decode(), keep_blank_values=True)
+        return self._form_cache
 
     def log_message(self, fmt, *args):  # quieter default log
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self):
+        self._begin()
         url = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(url.query)
         path = self._path()
@@ -1607,9 +1687,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
     def do_POST(self):
+        self._begin()
         url = urllib.parse.urlparse(self.path)
         form = self._form()
         path = self._path()
+        sid = sid_from_cookie(self.headers.get("Cookie"))
+        if not (sid and any(hmac.compare_digest(csrf_token(sid), t)
+                            for t in form.get("_csrf", []))):
+            self._send(page("Request rejected",
+                            "<p class='err'>This form's security token is "
+                            "missing or expired (the editor was restarted, or "
+                            "the request didn't come from one of its pages). "
+                            "Reload the page and try again.</p>"), 403)
+            return
+        _req.rendered = rendered_from_form(form)
         try:
             if path == "/areas/select":
                 resrefs = form.get("res", [])
@@ -1684,6 +1775,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "<p><a href='/module'>Back</a></p>" % esc(msg)))
             else:
                 self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except StaleEditError as e:
+            self._send(page("Edit conflict", "<p class='err'>%s</p>" % esc(e)), 409)
         except Exception as e:
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 

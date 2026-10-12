@@ -40,9 +40,10 @@ HIDDEN_IMPORTS = [
                    # base_library.zip by default like most stdlib modules are
                    # (confirmed by an actual build: omitting it produces a
                    # real ModuleNotFoundError at runtime, not just a warning).
-    "argparse", "collections", "datetime", "glob", "html", "http.server",
-    "importlib.machinery", "importlib.util", "json", "math", "mimetypes",
-    "os", "pathlib", "random", "re", "shutil", "sqlite3", "struct",
+    "argparse", "collections", "datetime", "glob", "hashlib", "hmac", "html",
+    "http.server", "importlib.machinery", "importlib.util", "json", "math",
+    "mimetypes", "os", "pathlib", "random", "re", "secrets", "shutil",
+    "sqlite3", "struct",
     "subprocess", "sys", "tempfile", "threading", "time", "typing",
     "urllib.parse", "uuid",
 ]
@@ -56,6 +57,7 @@ a = Analysis(
         (os.path.join(BIN, "nwn-wiki-activity"), "."),
         (os.path.join(BIN, "check-dlg-integrity"), "."),
         (os.path.join(BIN, "nwn-palette"), "."),
+        (os.path.join(BIN, "nwn-common"), "."),
         (os.path.join(BIN, "wiki_data"), "wiki_data"),
         (os.path.join(BIN, "wiki_assets"), "wiki_assets"),
     ],

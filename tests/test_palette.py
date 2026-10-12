@@ -230,5 +230,35 @@ class TlkNameTests(unittest.TestCase):
         self.assertEqual(PAL.node_name(PAL.node_at(d, (0, 0))), "Gear")
 
 
+class PaletteHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.proj = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.proj)
+        open(os.path.join(self.proj, "nasher.cfg"), "w").close()
+        self.unpacked = os.path.join(self.proj, "unpacked")
+        os.makedirs(self.unpacked)
+        with open(os.path.join(self.unpacked, "itempalcus.itp.json"), "w") as fh:
+            json.dump(palette(folder(None, None, [folder(1, "Armor", [])],
+                                     strref=1)), fh)
+
+    def test_edit_is_snapshotted_and_undo_restores_it(self):
+        before = open(PAL.palette_path(self.unpacked, "item")).read()
+        self.assertEqual(PAL.main(["--dir", self.unpacked, "mkdir", "item",
+                                   "/", "Extra"]), 0)
+        self.assertNotEqual(open(PAL.palette_path(self.unpacked, "item")).read(),
+                            before)
+        self.assertEqual(PAL.main(["--dir", self.unpacked, "undo", "item"]), 0)
+        self.assertEqual(open(PAL.palette_path(self.unpacked, "item")).read(),
+                         before)
+
+    def test_undo_without_history_or_project_is_an_error(self):
+        self.assertEqual(PAL.main(["--dir", self.unpacked, "undo", "item"]), 1)
+        loose = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, loose)
+        shutil.copy(PAL.palette_path(self.unpacked, "item"), loose)
+        self.assertEqual(PAL.main(["--dir", loose, "mkdir", "item", "/", "X"]), 0)
+        self.assertEqual(PAL.main(["--dir", loose, "undo", "item"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

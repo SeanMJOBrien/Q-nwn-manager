@@ -276,6 +276,30 @@ problem is refused. Stock (`STRREF`) entries are shown by their real names when 
 project's `tlk/dialog.tlk` is present (else `(strref N)`; override with
 `--dialog-tlk`). Renaming one swaps it for a custom `NAME`. The first edit of a file writes a `.json.bak`.
 
+### Edit safety (console, palette tool, standalone editor)
+
+- **CSRF protection.** Every POST form carries a token tied to a
+  `SameSite=Strict` session cookie, and a POST without a valid one is rejected
+  (403). Browsers need no action; a script that POSTs to the console with
+  `curl` must first GET a page (keeping the cookie) and send its `_csrf` field.
+  `/shutdown` and the two project-creation routes used by the standalone
+  `start.html` (opened from `file://`, which has no session) are exempt.
+- **Stale-edit refusal.** Each form records when it was rendered; saving a
+  file that changed on disk after that (another tab, an unpack, another tool)
+  is refused with a 409 so nothing is silently overwritten - reload and redo
+  the edit. The confirm step of a bulk edit keeps the *original* render time.
+- **Edit history / undo.** In an nwn-manager project (a folder with
+  `nasher.cfg`) every file the console or `nwn-manager palette` overwrites is
+  first copied to `.nwn-manager/history/` (last 10 versions per file,
+  gitignored). The console's **History** page lists them with a Restore button
+  (a restore is itself snapshotted, so it can be undone); on the CLI,
+  `nwn-manager palette undo <palette>` restores the previous palette. The
+  one-time `.bak` copy of the very first original is still written too. The
+  standalone `.bic` editor only has `.bak`.
+- **Area rename report.** Besides rewriting `module.ifo`, a tag/resref rename
+  lists scripts quoting the old value and (console) placed objects whose tag
+  embeds it as a whole word (`AREA_VAULT`) - report only, never edited.
+
 ### Smoke tests
 
 If your module project ships a file at `tests/smoke-test` that is executable,
