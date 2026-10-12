@@ -16,7 +16,7 @@ Palette shape (see docs/PLAN / the NWN wiki "Toolset Palette ITP" page):
   Blueprints whose PaletteID is 255 are deliberately kept out of palettes.
 
 Usage:
-  nwn-palette [--dir unpacked] list
+  nwn-palette [--dir unpacked] [--dialog-tlk FILE] list
   nwn-palette tree  <palette> [--leaves]
   nwn-palette check [<palette>]
   nwn-palette rename <palette> <node> <new name>      [--dry-run]
@@ -31,6 +31,8 @@ waypoint. <node> is an index path ("0.3.2", as `tree` prints) or a slash
 name path ("Armor/Helmets"; a leaf also matches by resref). `sync` lists
 project blueprints missing from the palette and, with --apply, files them
 under --into (default: a top-level "Custom" folder, created if absent).
+Stock names are strrefs; they show as text when <project>/tlk/dialog.tlk (kept
+there by `nwn-manager unpack`) or --dialog-tlk is available, else '(strref N)'.
 First edit of any file writes a one-time <file>.json.bak backup.
 """
 
@@ -40,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import sys
 
 # palette key -> (file stem, blueprint extension, blueprint name fields)
@@ -61,8 +64,75 @@ DEFAULT_FACTION = "Hostile"
 MAX_RESREF = 16
 
 
+CUSTOM_TLK_OFFSET = 0x01000000  # strrefs with bit 24 set -> the module's own .tlk
+
+
 class PaletteError(Exception):
     pass
+
+
+# --- TLK name resolution -----------------------------------------------------
+# Stock palette entries are named by STRREF, not text. A project keeps a copy of
+# dialog.tlk (and its custom .tlk) in <project>/tlk/, extracted at unpack time.
+
+class Tlk:
+    """Lazy TLK V3.0 reader: each lookup seeks to one 40-byte entry, so the
+    ~12 MB dialog.tlk is never loaded whole."""
+
+    def __init__(self, path):
+        self.path = path
+        self._cache = {}
+        with open(path, "rb") as fh:
+            head = fh.read(20)
+        if head[:4] != b"TLK ":
+            raise ValueError("not a TLK file: %s" % path)
+        self.count, self.entries_off = struct.unpack_from("<II", head, 12)
+
+    def get(self, ref):
+        if ref in self._cache:
+            return self._cache[ref]
+        text = ""
+        if 0 <= ref < self.count:
+            with open(self.path, "rb") as fh:
+                fh.seek(20 + ref * 40)
+                entry = fh.read(40)
+                flags, = struct.unpack_from("<I", entry, 0)
+                if flags & 0x1:  # TEXT_PRESENT
+                    off, size = struct.unpack_from("<II", entry, 28)
+                    fh.seek(self.entries_off + off)
+                    text = fh.read(size).decode("cp1252", "replace").strip()
+        self._cache[ref] = text
+        return text
+
+
+def make_resolver(project_root, unpacked, dialog_tlk=None):
+    """strref -> text callable for a project, or None if no dialog.tlk is
+    found. Looks in <project_root>/tlk/ (or an explicit dialog_tlk path); the
+    custom TLK is the one named by module.ifo.json's Mod_CustomTlk."""
+    tlk_dir = os.path.join(project_root, "tlk")
+    dialog_path = dialog_tlk or os.path.join(tlk_dir, "dialog.tlk")
+    dialog = Tlk(dialog_path) if os.path.isfile(dialog_path) else None
+    custom = None
+    ifo = os.path.join(unpacked, "module.ifo.json")
+    try:
+        with open(ifo, encoding="utf-8") as fh:
+            name = str(_val(json.load(fh), "Mod_CustomTlk", "")).strip()
+        path = os.path.join(tlk_dir, name + ".tlk")
+        if name and os.path.isfile(path):
+            custom = Tlk(path)
+    except (OSError, ValueError):
+        pass
+    if not (dialog or custom):
+        return None
+
+    def resolve(ref):
+        if ref >= CUSTOM_TLK_OFFSET:
+            return custom.get(ref - CUSTOM_TLK_OFFSET) if custom else ""
+        return dialog.get(ref) if dialog else ""
+    return resolve
+
+
+STRREF_RESOLVER = None  # set by the CLI; used when node_name() isn't given one
 
 
 # --- file plumbing -----------------------------------------------------------
@@ -125,6 +195,7 @@ def node_name(node, strref_text=None):
             return txt
     ref = _val(node, "STRREF")
     if ref is not None and ref != NO_STRREF:
+        strref_text = strref_text or STRREF_RESOLVER
         if strref_text:
             txt = strref_text(ref)
             if txt:
@@ -486,6 +557,9 @@ def _build_parser():
         prog="nwn-palette", description=__doc__.splitlines()[0])
     ap.add_argument("--dir", default="unpacked",
                     help="project unpacked/ directory (default: ./unpacked)")
+    ap.add_argument("--dialog-tlk", default=None, metavar="FILE",
+                    help="dialog.tlk used to show stock names (default: "
+                         "<project>/tlk/dialog.tlk when present)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     mut = argparse.ArgumentParser(add_help=False)
     mut.add_argument("--dry-run", action="store_true",
@@ -516,6 +590,9 @@ def _build_parser():
 
 def _run(args):
     root = os.path.abspath(args.dir)
+    global STRREF_RESOLVER
+    STRREF_RESOLVER = make_resolver(os.path.dirname(root), root,
+                                    args.dialog_tlk)
     if args.cmd == "list":
         for key in available(root):
             folders, leaves = _stats(load(root, key))
