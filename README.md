@@ -276,6 +276,15 @@ problem is refused. Stock (`STRREF`) entries are shown by their real names when 
 project's `tlk/dialog.tlk` is present (else `(strref N)`; override with
 `--dialog-tlk`). Renaming one swaps it for a custom `NAME`. The first edit of a file writes a `.json.bak`.
 
+### Cross-reference (console **Find** page)
+
+`/xref?q=<name>` answers "where is this used?" for a tag, blueprint resref,
+script or variable name: every GFF JSON field that equals it (area, placed
+objects, dialogs, blueprints, palettes, `module.ifo`) with the field path,
+`.nss` source that quotes it, and object tags that contain it as a whole
+word. Files named for it are listed as "Defined by". Matches are exact and
+case-insensitive; compiled-only scripts and runtime-built names can't be seen.
+
 ### Edit safety (console, palette tool, standalone editor)
 
 - **CSRF protection.** Every POST form carries a token tied to a

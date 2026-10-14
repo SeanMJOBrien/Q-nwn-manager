@@ -162,9 +162,12 @@ work. Items marked *(unchecked)* are leads from skimming, not verified.
 
 ### New features (not started)
 
-- **Cross-reference report.** "Where is this blueprint / tag / resref used?"
-  across areas, dialogs, scripts and palettes. The rename scans are a starting
-  point; `nwn-mcp` has `find_orphans` / `find_variable_usage` for comparison.
+- **Cross-reference report.** *Done (console `/xref`, "Find" in the nav).*
+  Exact, case-insensitive search for a tag/resref/script/variable name across
+  every `*.json` GFF file, `.nss` quoted strings and whole-word object tags,
+  grouped by file type with the field path. ~0.5 s over the 285 MB
+  2,518-area project. Not done: a CLI form, `.ncs`-only scripts, substring
+  search, and linking from the rename preview.
 - **Generic blueprint scalar editor** for `.uti`/`.utp`/`.utd`/`.utt`/`.utm`/
   `.ute` with a preview step (the gap noted under "Other NWN file types").
 - **Palette extras:** drag-and-drop reordering, collapsible folders, and an
