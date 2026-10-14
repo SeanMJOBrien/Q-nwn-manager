@@ -310,6 +310,7 @@ def _nav():
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
         if proj and proj.has_module():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+        links.append("<a href='%s'>Find</a>" % purl("/xref"))
         if proj and proj.history_dir():
             links.append("<a href='%s'>History</a>" % purl("/history"))
         links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
@@ -321,6 +322,7 @@ def _nav():
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+            links.append("<a href='%s'>Find</a>" % purl("/xref"))
             links.append("<a href='%s'>History</a>" % purl("/history"))
             links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
             if _has_wiki_current():
@@ -1265,6 +1267,164 @@ def render_rename_scans(root, git_root, form):
     needles = pending_rename_needles(root, form)
     return (render_script_scan(scan_script_references(root, needles))
             + render_embedded_tags(scan_embedded_tags(git_root, needles)))
+
+
+# --- Cross-reference ("where is this used?") ---------------------------------
+
+XREF_MIN_LEN = 2
+XREF_FILE_CAP = 300      # files listed before the rest are only counted
+XREF_HITS_PER_FILE = 6
+XREF_KINDS = {
+    "are": "Areas", "git": "Placed objects (area .git)", "gic": "Area .gic",
+    "dlg": "Dialogs", "utc": "Creature blueprints", "uti": "Item blueprints",
+    "utp": "Placeable blueprints", "utd": "Door blueprints",
+    "utt": "Trigger blueprints", "utm": "Store blueprints",
+    "ute": "Encounter blueprints", "uts": "Sound blueprints",
+    "utw": "Waypoint blueprints", "itp": "Palettes", "ifo": "Module",
+    "jrl": "Journal", "fac": "Factions", "bic": "Characters",
+}
+
+
+def _xref_walk(node, path, needle, out):
+    """Append (field path, value) for every string equal to `needle`
+    (case-insensitive) inside a GFF-as-JSON node."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "type" or k.startswith("__"):
+                continue
+            _xref_walk(v, path if k == "value" else (path + "." + k if path else k),
+                       needle, out)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _xref_walk(v, "%s[%d]" % (path, i), needle, out)
+    elif isinstance(node, str) and node.lower() == needle:
+        out.append((path, node))
+
+
+def find_references(roots, needle):
+    """Everywhere `needle` (a tag, resref or script/variable name) appears:
+    {"defined": [files named for it], "files": [(relpath, kind, [(path,
+    value)])], "scripts": [(relpath, lineno, line)]}. Exact, case-insensitive
+    string matches only - a net, not proof of a real reference. A cheap
+    raw-text check skips files that can't match before any JSON is parsed."""
+    needle = needle.strip().lower()
+    result = {"defined": [], "files": [], "scripts": []}
+    if len(needle) < XREF_MIN_LEN:
+        return result
+    seen = set()
+    for root in roots:
+        root = os.path.abspath(root)
+        if root in seen:
+            continue
+        seen.add(root)
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for fn in sorted(files):
+                low = fn.lower()
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root)
+                if low.split(".", 1)[0] == needle:
+                    result["defined"].append(rel)
+                if not low.endswith(".json"):
+                    continue
+                try:
+                    with open(full, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                    if needle not in text.lower():
+                        continue
+                    hits = []
+                    _xref_walk(json.loads(text), "", needle, hits)
+                except (OSError, ValueError):
+                    continue
+                if hits:
+                    kind = low.rsplit(".", 2)[-2] if low.count(".") >= 2 else "?"
+                    result["files"].append((rel, kind, hits))
+        for n, rows in scan_script_references(root, [needle]).items():
+            result["scripts"].extend(rows)
+    return result
+
+
+def render_xref(proj, query_text=""):
+    q = query_text.strip()
+    form = ("<form method='get' action='%s'><input name='q' value='%s' "
+            "size='32' placeholder='tag, resref, script or variable name'> "
+            "<button>Find references</button></form>" % (purl("/xref"), esc(q)))
+    if not q:
+        return page("Cross-reference", form + "<p class='note'>Finds every "
+                    "place a tag, blueprint resref, script or variable name "
+                    "appears: area and object fields, dialogs, blueprints, "
+                    "palettes, module.ifo, and quoted in <code>.nss</code> "
+                    "source. Exact, case-insensitive matches.</p>")
+    if len(q) < XREF_MIN_LEN:
+        return page("Cross-reference", form + "<p class='err'>Enter at least "
+                    "%d characters.</p>" % XREF_MIN_LEN)
+    roots = [proj.unpacked, proj.git_root, proj.gic_root]
+    if os.path.isdir(os.path.join(proj.root, "src")):
+        roots.append(os.path.join(proj.root, "src"))
+    roots = [r for r in roots if os.path.isdir(r)]
+    res = find_references(roots, q)
+    embed = scan_embedded_tags(proj.git_root, [q]).get(q, [])
+    total = sum(len(h) for _, _, h in res["files"]) + len(res["scripts"])
+    parts = [form, "<p><b>%d</b> reference%s to <code>%s</code> in %d file%s."
+             "</p>" % (total, "" if total == 1 else "s", esc(q),
+                       len(res["files"]) + len({r[0] for r in res["scripts"]}),
+                       ""if len(res["files"]) + len({r[0] for r in res["scripts"]}) == 1 else "s")]
+    if res["defined"]:
+        parts.append("<h3>Defined by</h3><ul>%s</ul>" % "".join(
+            "<li><code>%s</code></li>" % esc(f) for f in res["defined"]))
+    groups = {}
+    for rel, kind, hits in res["files"]:
+        groups.setdefault(kind, []).append((rel, hits))
+    shown = 0
+    for kind in sorted(groups, key=lambda k: (XREF_KINDS.get(k, "~" + k))):
+        items = []
+        for rel, hits in groups[kind]:
+            if shown >= XREF_FILE_CAP:
+                break
+            shown += 1
+            stem = os.path.basename(rel).split(".", 1)[0]
+            link = ""
+            if kind in ("are", "git"):
+                link = (" <a href='%s'>edit area</a>" %
+                        purl("/areas/edit?res=%s&action=tags" % urllib.parse.quote(stem)))
+            elif kind == "utc":
+                link = (" <a href='%s'>edit</a>" %
+                        purl("/creature?res=%s" % urllib.parse.quote(stem)))
+            fields = "".join("<li><code>%s</code> = %s</li>" % (esc(pth), esc(v))
+                             for pth, v in hits[:XREF_HITS_PER_FILE])
+            more = ("<li class='note'>+%d more</li>" % (len(hits) - XREF_HITS_PER_FILE)
+                    if len(hits) > XREF_HITS_PER_FILE else "")
+            items.append("<li><code>%s</code>%s<ul>%s%s</ul></li>"
+                         % (esc(rel), link, fields, more))
+        n = sum(len(h) for _, h in groups[kind])
+        parts.append("<h3>%s <span class='note'>(%d)</span></h3><ul>%s</ul>"
+                     % (esc(XREF_KINDS.get(kind, "." + kind)), n, "".join(items)))
+    if shown >= XREF_FILE_CAP and len(res["files"]) > shown:
+        parts.append("<p class='note'>Listing capped at %d files; %d more not "
+                     "shown.</p>" % (XREF_FILE_CAP, len(res["files"]) - shown))
+    if res["scripts"]:
+        rows = res["scripts"][:XREF_FILE_CAP]
+        parts.append("<h3>Scripts quoting it <span class='note'>(%d)</span></h3>"
+                     "<ul>%s</ul>" % (len(res["scripts"]), "".join(
+                         "<li><code>%s:%d</code> %s</li>" % (esc(f), ln, esc(t))
+                         for f, ln, t in rows)))
+        if len(res["scripts"]) > len(rows):
+            parts.append("<p class='note'>+%d more</p>" % (len(res["scripts"]) - len(rows)))
+    if embed:
+        parts.append("<h3>Object tags containing it as a word "
+                     "<span class='note'>(%d)</span></h3><ul>%s</ul>" % (
+                         len(embed), "".join(
+                             "<li><code>%s</code> %s tag <code>%s</code></li>"
+                             % (esc(a), esc(c), esc(t))
+                             for a, c, t in embed[:EMBED_SCAN_CAP])))
+    if not total and not res["defined"] and not embed:
+        parts.append("<p class='note'>Nothing found. Compiled-only scripts "
+                     "(<code>.ncs</code>) and values built at runtime from "
+                     "string pieces can't be seen.</p>")
+    else:
+        parts.append("<p class='note'>Exact, case-insensitive string matches; "
+                     "scripts are <code>.nss</code> source only.</p>")
+    return page("Cross-reference: " + q, "".join(parts))
 
 
 def apply_tags(root, git_root, gic_root, form, dry_run=False):
@@ -3892,6 +4052,8 @@ class Handler(BaseHTTPRequestHandler):
                                 % purl("/areas")), 404)
                 return
             self._send(render_instance_form(root, ares, idx, entries[idx]))
+        elif sub == "/xref":
+            self._send(render_xref(proj, query.get("q", [""])[0]))
         elif sub == "/history":
             self._send(render_history(proj, query.get("msg", [""])[0]))
         elif sub == "/palettes":
