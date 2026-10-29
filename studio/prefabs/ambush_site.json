@@ -1,0 +1,77 @@
+{
+  "id": "ambush_site",
+  "name": "Roadside ambush (spawns + event points)",
+  "description": "Four `random1` markers on either side of a path plus two `_wp_event` waypoints, boulders and a dead tree for cover. Set `event1`/`event_chance` on the area to use the waypoints.",
+  "tags": [
+    "ambush",
+    "spawn",
+    "event",
+    "hostile"
+  ],
+  "radius": 7.91,
+  "items": [
+    {
+      "kind": "marker",
+      "dx": -6.0,
+      "dy": -4.0,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": 6.0,
+      "dy": -2.0,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -6.5,
+      "dy": 3.5,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": 6.5,
+      "dy": 4.5,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "waypoint",
+      "dx": 0.0,
+      "dy": -5.0,
+      "facing": 90.0,
+      "resref": "_wp_event"
+    },
+    {
+      "kind": "waypoint",
+      "dx": 0.0,
+      "dy": 5.0,
+      "facing": 90.0,
+      "resref": "_wp_event"
+    },
+    {
+      "kind": "placeable",
+      "dx": -4.4,
+      "dy": 0.4,
+      "facing": 20.0,
+      "resref": "plc_boulder"
+    },
+    {
+      "kind": "placeable",
+      "dx": 4.8,
+      "dy": -4.4,
+      "facing": 140.0,
+      "resref": "plc_boulder"
+    },
+    {
+      "kind": "placeable",
+      "dx": 7.4,
+      "dy": 1.2,
+      "facing": 0.0,
+      "resref": "x0_deadtree"
+    }
+  ]
+}

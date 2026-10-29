@@ -1,0 +1,110 @@
+{
+  "id": "example_random_camp",
+  "title": "Example: hunters' camp that sometimes appears in Mantle Clearing",
+  "area": "mantle",
+  "objects": [
+    {
+      "kind": "placeable",
+      "resref": "plc_campfrwspit",
+      "x": 68.5,
+      "y": 45.5,
+      "facing": 30.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "x2_plc_tent_r",
+      "x": 68.5,
+      "y": 52.0,
+      "facing": 270.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "x2_plc_tent_r",
+      "x": 68.5,
+      "y": 39.0,
+      "facing": 90.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "x2_plc_tent_b",
+      "x": 74.9,
+      "y": 44.4,
+      "facing": 170.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "plc_table",
+      "x": 71.7,
+      "y": 46.7,
+      "facing": 120.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "plc_chair",
+      "x": 71.0,
+      "y": 48.0,
+      "facing": 300.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "plc_chair",
+      "x": 72.5,
+      "y": 45.4,
+      "facing": 120.0
+    },
+    {
+      "kind": "placeable",
+      "resref": "plc_keg",
+      "x": 71.7,
+      "y": 49.2,
+      "facing": 60.0
+    },
+    {
+      "kind": "creature",
+      "resref": "hunter",
+      "x": 66.5,
+      "y": 46.5,
+      "facing": 0.0
+    },
+    {
+      "kind": "creature",
+      "resref": "hunter",
+      "x": 70.0,
+      "y": 43.0,
+      "facing": 100.0
+    }
+  ],
+  "camp_event": {
+    "script": "eve_ex_camp",
+    "weight": 1,
+    "origin": {
+      "x": 68.5,
+      "y": 45.5,
+      "facing": 90
+    },
+    "spots": [
+      {
+        "x": 14.5,
+        "y": 75.5,
+        "facing": 90.0
+      },
+      {
+        "x": 134.5,
+        "y": 64.5,
+        "facing": 270.0
+      },
+      {
+        "x": 91.5,
+        "y": 128.5,
+        "facing": 0.0
+      },
+      {
+        "x": 68.5,
+        "y": 20.5,
+        "facing": 180.0
+      }
+    ],
+    "replaces_group": 2,
+    "replace_radius": 30
+  }
+}

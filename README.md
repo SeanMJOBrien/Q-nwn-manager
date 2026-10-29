@@ -403,6 +403,26 @@ unchanged.
 > files (binary GFF, outside a project's `unpacked/`), use the standalone
 > `skills/nwn-web-editor/scripts/nwn_web_editor.py`.
 
+### Content Studio (quests and camps, any module)
+
+`studio/` holds the **Content Studio**: a local web UI and CLI that designs multi-stage **quests** (journal, quest giver and dialog, kill/pickup/enter-area
+stages, rewards) and plain **camps**, and stages them as reviewable, undoable change sets for the current project. It was built for The Frozen North and also
+works on any module project, including a brand-new one: the first quest installs a small self-contained quest runtime into the module.
+
+```sh
+cd ~/GIT/my_module
+nwn-manager studio doctor        # project, tools and NWN install check
+nwn-manager studio               # web UI for this project (http://127.0.0.1:8350)
+nwn-manager studio setup --check # is the quest runtime installed?   (`setup` stages it on its own)
+nwn-manager studio quest stage <tag>
+nwn-manager studio changes list|show|apply|undo
+```
+
+Drafts live in the project (`studio-specs/`, commit them), the staging area in `.studio/` (git-ignored; new projects ignore it already, add `/.studio/` to older
+ones). The user manual is `studio/MANUAL.html` (chapter 18 covers using it with nwn-manager). Needs `python3`; a compiled `nwn-pytools` built before the studio
+existed is bypassed for this command (rebuild it with `build/nwn-pytools.spec` to bundle the studio). Not available in generic modules: spawn groups, random camps
+and the Spawn Designer (they need Frozen North's `area_init`). Requires NWN:EE (the dialog scripts use `GetScriptParam`).
+
 ### Generate the wiki
 
 ```sh

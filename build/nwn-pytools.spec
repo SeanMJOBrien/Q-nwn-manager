@@ -57,6 +57,11 @@ a = Analysis(
         (os.path.join(BIN, "check-dlg-integrity"), "."),
         (os.path.join(BIN, "wiki_data"), "wiki_data"),
         (os.path.join(BIN, "wiki_assets"), "wiki_assets"),
+        # Content Studio: a plain package (tfnstudio/) plus its web pages, runtime scripts, prefabs and manual
+        (os.path.join(REPO_ROOT, "studio", "tfnstudio"), os.path.join("studio", "tfnstudio")),
+        (os.path.join(REPO_ROOT, "studio", "runtime"), os.path.join("studio", "runtime")),
+        (os.path.join(REPO_ROOT, "studio", "prefabs"), os.path.join("studio", "prefabs")),
+        (os.path.join(REPO_ROOT, "studio", "MANUAL.html"), "studio"),
     ],
     hiddenimports=HIDDEN_IMPORTS,
     hookspath=[],

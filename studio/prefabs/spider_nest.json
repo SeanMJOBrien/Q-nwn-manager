@@ -1,0 +1,112 @@
+{
+  "id": "spider_nest",
+  "name": "Spider nest (random spawns)",
+  "description": "Webs and cocoons with a skeleton victim; four `random1` markers. Pair with a spider encounter.",
+  "tags": [
+    "nest",
+    "spider",
+    "spawn",
+    "hostile"
+  ],
+  "radius": 6.51,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": 0.0,
+      "facing": 10.0,
+      "resref": "x2_plc_web"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.0,
+      "dy": 2.0,
+      "facing": 80.0,
+      "resref": "x2_plc_web"
+    },
+    {
+      "kind": "placeable",
+      "dx": -3.4,
+      "dy": 1.0,
+      "facing": 150.0,
+      "resref": "x2_plc_web"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.0,
+      "dy": -3.6,
+      "facing": 220.0,
+      "resref": "x2_plc_web"
+    },
+    {
+      "kind": "placeable",
+      "dx": -2.0,
+      "dy": -4.0,
+      "facing": 300.0,
+      "resref": "x2_plc_web"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.6,
+      "dy": 1.4,
+      "facing": 40.0,
+      "resref": "spdcocoon001"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.4,
+      "dy": -1.2,
+      "facing": 120.0,
+      "resref": "spdcocoon001"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.6,
+      "dy": -1.6,
+      "facing": 200.0,
+      "resref": "spdcocoon001"
+    },
+    {
+      "kind": "placeable",
+      "dx": -0.4,
+      "dy": 2.6,
+      "facing": 60.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.0,
+      "dy": -0.6,
+      "facing": 90.0,
+      "resref": "nw_pl_skeleton"
+    },
+    {
+      "kind": "marker",
+      "dx": 4.6,
+      "dy": 4.6,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -4.6,
+      "dy": 4.6,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -4.6,
+      "dy": -4.6,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": 4.6,
+      "dy": -4.6,
+      "facing": 0.0,
+      "group": 1
+    }
+  ]
+}

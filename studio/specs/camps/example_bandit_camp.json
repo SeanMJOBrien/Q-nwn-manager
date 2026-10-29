@@ -1,0 +1,135 @@
+{
+  "id": "example_bandit_camp",
+  "title": "Example: bandit camp in Mantle Clearing",
+  "area": "mantle",
+  "objects": [
+    {
+      "kind": "placeable",
+      "x": 68.5,
+      "y": 45.5,
+      "facing": 30.0,
+      "resref": "plc_campfrwspit"
+    },
+    {
+      "kind": "placeable",
+      "x": 68.4996,
+      "y": 52.0007,
+      "facing": 270.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "x": 68.5004,
+      "y": 38.9993,
+      "facing": 90.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "x": 74.9028,
+      "y": 44.37,
+      "facing": 170.0,
+      "resref": "x2_plc_tent_b"
+    },
+    {
+      "kind": "placeable",
+      "x": 71.7445,
+      "y": 46.6804,
+      "facing": 120.0,
+      "resref": "plc_table"
+    },
+    {
+      "kind": "placeable",
+      "x": 70.9945,
+      "y": 47.9794,
+      "facing": 300.0,
+      "resref": "plc_chair"
+    },
+    {
+      "kind": "placeable",
+      "x": 72.4945,
+      "y": 45.3813,
+      "facing": 120.0,
+      "resref": "plc_chair"
+    },
+    {
+      "kind": "placeable",
+      "x": 71.6837,
+      "y": 49.1856,
+      "facing": 60.0,
+      "resref": "plc_keg"
+    },
+    {
+      "kind": "placeable",
+      "x": 74.2435,
+      "y": 45.3519,
+      "facing": 170.0,
+      "resref": "plc_keg"
+    },
+    {
+      "kind": "placeable",
+      "x": 65.0215,
+      "y": 46.7249,
+      "facing": 45.0,
+      "resref": "plc_sacks"
+    },
+    {
+      "kind": "placeable",
+      "x": 66.7555,
+      "y": 41.7215,
+      "facing": 100.0,
+      "resref": "plc_box2"
+    },
+    {
+      "kind": "placeable",
+      "x": 63.3627,
+      "y": 45.9981,
+      "facing": 120.0,
+      "resref": "plc_weaponrack"
+    },
+    {
+      "kind": "placeable",
+      "x": 70.8124,
+      "y": 44.2947,
+      "facing": 80.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "marker",
+      "x": 73.6425,
+      "y": 51.6329,
+      "facing": 30.0,
+      "group": 4
+    },
+    {
+      "kind": "marker",
+      "x": 62.3671,
+      "y": 50.6425,
+      "facing": 30.0,
+      "group": 4
+    },
+    {
+      "kind": "marker",
+      "x": 63.3575,
+      "y": 39.3671,
+      "facing": 30.0,
+      "group": 4
+    },
+    {
+      "kind": "marker",
+      "x": 74.6329,
+      "y": 40.3575,
+      "facing": 30.0,
+      "group": 4
+    }
+  ],
+  "groups": [
+    {
+      "n": 4,
+      "ute": "bandit_moderate",
+      "spawns": 6,
+      "script": ""
+    }
+  ],
+  "cr": 4
+}

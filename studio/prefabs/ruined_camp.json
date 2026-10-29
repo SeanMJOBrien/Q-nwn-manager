@@ -1,0 +1,126 @@
+{
+  "id": "ruined_camp",
+  "name": "Raided / ruined camp",
+  "description": "Burnt and broken wagons, corpses, blood and bones. One small loot chest (`treas_*` containers roll TFN loot).",
+  "tags": [
+    "camp",
+    "decor",
+    "ruin",
+    "loot"
+  ],
+  "radius": 7.0,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": -3.0,
+      "dy": 1.5,
+      "facing": 20.0,
+      "resref": "plc_burnwagon"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.6,
+      "dy": -1.0,
+      "facing": 100.0,
+      "resref": "plc_ruinwagon"
+    },
+    {
+      "kind": "placeable",
+      "dx": -0.5,
+      "dy": -3.0,
+      "facing": 70.0,
+      "resref": "plc_wagonwheel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 6.0,
+      "dy": 2.0,
+      "facing": 10.0,
+      "resref": "plc_wagonwheel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.5,
+      "dy": 1.2,
+      "facing": 190.0,
+      "resref": "plc_arrowcorpse"
+    },
+    {
+      "kind": "placeable",
+      "dx": -4.8,
+      "dy": -2.2,
+      "facing": 300.0,
+      "resref": "plc_arrowcorpse"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.2,
+      "dy": 3.4,
+      "facing": 90.0,
+      "resref": "plc_spearcorpse"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.8,
+      "dy": 3.4,
+      "facing": 40.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "placeable",
+      "dx": 4.6,
+      "dy": -3.6,
+      "facing": 130.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": -1.0,
+      "facing": 250.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.2,
+      "dy": 0.2,
+      "facing": 10.0,
+      "resref": "plc_bloodstain"
+    },
+    {
+      "kind": "placeable",
+      "dx": -4.4,
+      "dy": -1.8,
+      "facing": 100.0,
+      "resref": "plc_bloodstain"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.0,
+      "dy": 3.0,
+      "facing": 200.0,
+      "resref": "plc_bloodstain"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.2,
+      "dy": -4.4,
+      "facing": 160.0,
+      "resref": "treas_smallchest"
+    },
+    {
+      "kind": "placeable",
+      "dx": -6.0,
+      "dy": -3.6,
+      "facing": 0.0,
+      "resref": "plc_barrel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 5.8,
+      "dy": -2.6,
+      "facing": 30.0,
+      "resref": "plc_sacks"
+    }
+  ]
+}

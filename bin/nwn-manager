@@ -74,7 +74,9 @@ unset _pt_plat _pt_root _pt_cand _pt_exe 2>/dev/null || true
 # check-dlg-integrity/hak-list/tlk-name); remaining args passed through.
 run_pytool() {
   local sub=$1; shift
-  if [[ -n $PYTOOLS_BIN ]]; then
+  if [[ $sub == studio ]] && command -v python3 >/dev/null 2>&1; then
+    python3 "$SCRIPT_DIR/../studio/bin/tfn-studio" "$@"
+  elif [[ -n $PYTOOLS_BIN ]]; then
     "$PYTOOLS_BIN" "$sub" "$@"
   elif [[ $sub == check-dlg-integrity ]]; then
     "$SCRIPT_DIR/check-dlg-integrity" "$@"
@@ -90,7 +92,11 @@ run_pytool() {
 # which only ever invoke one of the nwn-$sub-named scripts.
 run_pytool_exec() {
   local sub=$1; shift
-  if [[ -n $PYTOOLS_BIN ]]; then
+  # studio: run from source when python3 is there (a nwn-pytools binary built before the studio existed does not
+  # know the subcommand); otherwise fall back to the binary.
+  if [[ $sub == studio ]] && command -v python3 >/dev/null 2>&1; then
+    exec python3 "$SCRIPT_DIR/../studio/bin/tfn-studio" "$@"
+  elif [[ -n $PYTOOLS_BIN ]]; then
     exec "$PYTOOLS_BIN" "$sub" "$@"
   else
     exec python3 "$SCRIPT_DIR/nwn-$sub" "$@"
@@ -141,6 +147,15 @@ Usage:
                           args pass through to nwn-area-editor (--port,
                           --url-prefix, --wiki-shell, --wiki-base, --nav).
 
+  $PROG studio [serve|setup|doctor|quest|camp|changes ...]
+                          Content Studio: design quests (and plain camps) in a
+                          web UI and stage them as reviewable change sets.
+                          Works on the current project. 'studio' alone starts
+                          the web UI; 'studio setup' installs the studio's
+                          quest scripts into a module that has none; the
+                          change sets are applied with 'studio changes apply'.
+                          See studio/MANUAL.md. Extra args pass through.
+
   $PROG serve --log-dir <dir> [options]
                           Monitor player activity via NWN server logs.
                           Polls every 5 minutes (configurable). When
@@ -179,6 +194,8 @@ Per-project layout (created by 'init'):
   dist/          packed .mod output (gitignored)
   docs/          generated wiki — committed; GitHub Pages serves from here
   .nasher/       nasher cache + last-used source path (gitignored)
+  .studio/       Content Studio staging area + undo log (gitignored)
+  studio-specs/  Content Studio quest/camp drafts (committed)
 
 Prerequisites (must be on PATH):
   nasher              — nimble install nasher
@@ -454,6 +471,7 @@ cmd_init() {
 /.nasher/
 /dist/
 /tlk/
+/.studio/
 *.mod
 *.ncs
 *.erf
@@ -906,6 +924,22 @@ cmd_edit_areas() {
     --landing-dir "$(cd "$SCRIPT_DIR/.." && pwd)" "$@"
 }
 
+cmd_studio() {
+  # Content Studio, scoped to the current project (nearest nasher.cfg). With no sub-command it serves the web UI.
+  local root
+  root=$(find_project_root) || {
+    echo "error: not inside an nwn-manager project (no nasher.cfg found above $PWD)" >&2
+    exit 1
+  }
+  local sub=${1:-serve}
+  [[ $# -gt 0 ]] && shift
+  case "$sub" in
+    serve) set -- serve "$@" ;;
+    *) set -- "$sub" "$@" ;;
+  esac
+  run_pytool_exec studio --module "$root" "$@"
+}
+
 cmd_serve() {
   local root
   root=$(find_project_root) || {
@@ -1077,6 +1111,10 @@ main() {
     edit-areas)
       shift; preflight python3
       cmd_edit_areas "$@"
+      ;;
+    studio)
+      shift; preflight python3
+      cmd_studio "$@"
       ;;
     serve)
       shift; preflight python3

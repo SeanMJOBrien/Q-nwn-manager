@@ -1,0 +1,83 @@
+{
+  "id": "camp_tents",
+  "name": "Tent camp",
+  "description": "Three tents around a pot fire, with bedrolls, crates and a weapon rack.",
+  "tags": [
+    "camp",
+    "decor",
+    "neutral"
+  ],
+  "radius": 5.8,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": 0.0,
+      "facing": 0.0,
+      "resref": "plc_campfrwpot"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.98,
+      "dy": 5.45,
+      "facing": 250.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.98,
+      "dy": -5.45,
+      "facing": 70.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.73,
+      "dy": -4.44,
+      "facing": 130.0,
+      "resref": "x2_plc_tent_b"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.2,
+      "dy": 0.8,
+      "facing": 200.0,
+      "resref": "plc_bedrolls"
+    },
+    {
+      "kind": "placeable",
+      "dx": -2.0,
+      "dy": -1.4,
+      "facing": 20.0,
+      "resref": "plc_bedrolls"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.6,
+      "dy": 3.4,
+      "facing": 0.0,
+      "resref": "plc_barrel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.2,
+      "dy": -3.0,
+      "facing": 40.0,
+      "resref": "treas_crate"
+    },
+    {
+      "kind": "placeable",
+      "dx": -4.4,
+      "dy": -2.6,
+      "facing": 0.0,
+      "resref": "plc_weaponrack"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.0,
+      "dy": -3.8,
+      "facing": 80.0,
+      "resref": "plc_sacks"
+    }
+  ]
+}

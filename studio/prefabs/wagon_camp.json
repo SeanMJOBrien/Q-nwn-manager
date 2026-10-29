@@ -1,0 +1,84 @@
+{
+  "id": "wagon_camp",
+  "name": "Merchant wagon camp",
+  "description": "Two wagons, a campfire, bedrolls, crates and barrels. Decoration for a travelling merchant.",
+  "tags": [
+    "camp",
+    "decor",
+    "neutral",
+    "merchant"
+  ],
+  "radius": 7.02,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": -3.4,
+      "dy": 0.0,
+      "facing": 90.0,
+      "resref": "plc_emptywagon"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.6,
+      "dy": -0.4,
+      "facing": 80.0,
+      "resref": "plc_fullwagon"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": -4.6,
+      "facing": 0.0,
+      "resref": "plc_campfr"
+    },
+    {
+      "kind": "placeable",
+      "dx": -2.0,
+      "dy": -4.4,
+      "facing": 340.0,
+      "resref": "plc_bedrolls"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.0,
+      "dy": -4.6,
+      "facing": 200.0,
+      "resref": "plc_bedrolls"
+    },
+    {
+      "kind": "placeable",
+      "dx": -6.4,
+      "dy": 2.6,
+      "facing": 30.0,
+      "resref": "treas_crate"
+    },
+    {
+      "kind": "placeable",
+      "dx": 6.6,
+      "dy": 2.4,
+      "facing": 100.0,
+      "resref": "plc_box1"
+    },
+    {
+      "kind": "placeable",
+      "dx": -5.8,
+      "dy": -2.6,
+      "facing": 0.0,
+      "resref": "plc_barrel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 6.0,
+      "dy": -3.2,
+      "facing": 0.0,
+      "resref": "plc_barrel"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.4,
+      "dy": 3.0,
+      "facing": 45.0,
+      "resref": "plc_sacks"
+    }
+  ]
+}

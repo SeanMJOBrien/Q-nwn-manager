@@ -1,0 +1,133 @@
+{
+  "id": "bandit_camp",
+  "name": "Bandit camp (random spawns)",
+  "description": "Tents, spit fire, table with chairs, kegs and a weapon rack, ringed by four `random1` markers so a spawn group appears around it. Assign group 1 to a bandit encounter.",
+  "tags": [
+    "camp",
+    "bandit",
+    "spawn",
+    "hostile"
+  ],
+  "radius": 8.0,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": 0.0,
+      "facing": 0.0,
+      "resref": "plc_campfrwspit"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.25,
+      "dy": 5.63,
+      "facing": 240.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "dx": -3.25,
+      "dy": -5.63,
+      "facing": 60.0,
+      "resref": "x2_plc_tent_r"
+    },
+    {
+      "kind": "placeable",
+      "dx": 4.98,
+      "dy": -4.18,
+      "facing": 140.0,
+      "resref": "x2_plc_tent_b"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.4,
+      "dy": -0.6,
+      "facing": 90.0,
+      "resref": "plc_table"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.4,
+      "dy": 0.9,
+      "facing": 270.0,
+      "resref": "plc_chair"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.4,
+      "dy": -2.1,
+      "facing": 90.0,
+      "resref": "plc_chair"
+    },
+    {
+      "kind": "placeable",
+      "dx": 4.6,
+      "dy": 1.6,
+      "facing": 30.0,
+      "resref": "plc_keg"
+    },
+    {
+      "kind": "placeable",
+      "dx": 4.9,
+      "dy": -3.0,
+      "facing": 140.0,
+      "resref": "plc_keg"
+    },
+    {
+      "kind": "placeable",
+      "dx": -2.4,
+      "dy": 2.8,
+      "facing": 15.0,
+      "resref": "plc_sacks"
+    },
+    {
+      "kind": "placeable",
+      "dx": -3.4,
+      "dy": -2.4,
+      "facing": 70.0,
+      "resref": "plc_box2"
+    },
+    {
+      "kind": "placeable",
+      "dx": -4.2,
+      "dy": 3.0,
+      "facing": 90.0,
+      "resref": "plc_weaponrack"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.4,
+      "dy": -2.2,
+      "facing": 50.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "marker",
+      "dx": 7.52,
+      "dy": 2.74,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -2.74,
+      "dy": 7.52,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -7.52,
+      "dy": -2.74,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": 2.74,
+      "dy": -7.52,
+      "facing": 0.0,
+      "group": 1
+    }
+  ]
+}

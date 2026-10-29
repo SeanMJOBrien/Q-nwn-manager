@@ -1,0 +1,105 @@
+{
+  "id": "graveyard_small",
+  "name": "Small graveyard (random spawns)",
+  "description": "Six headstones in two rows, a dead tree and bones; four `random1` markers. Pair with an undead encounter.",
+  "tags": [
+    "graveyard",
+    "undead",
+    "spawn",
+    "hostile"
+  ],
+  "radius": 7.21,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": -3.0,
+      "dy": 2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": 2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.0,
+      "dy": 2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": -3.0,
+      "dy": -2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": -2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.0,
+      "dy": -2.5,
+      "facing": 270.0,
+      "resref": "plc_headstone"
+    },
+    {
+      "kind": "placeable",
+      "dx": -6.0,
+      "dy": 4.0,
+      "facing": 0.0,
+      "resref": "x0_deadtree"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.4,
+      "dy": 0.0,
+      "facing": 30.0,
+      "resref": "plc_bones"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.4,
+      "dy": -0.2,
+      "facing": 120.0,
+      "resref": "nw_pl_skeleton"
+    },
+    {
+      "kind": "marker",
+      "dx": 6.06,
+      "dy": 3.5,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -3.5,
+      "dy": 6.06,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": -6.06,
+      "dy": -3.5,
+      "facing": 0.0,
+      "group": 1
+    },
+    {
+      "kind": "marker",
+      "dx": 3.5,
+      "dy": -6.06,
+      "facing": 0.0,
+      "group": 1
+    }
+  ]
+}

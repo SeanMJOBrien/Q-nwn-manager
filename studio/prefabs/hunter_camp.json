@@ -1,0 +1,69 @@
+{
+  "id": "hunter_camp",
+  "name": "Hunter's camp",
+  "description": "A lone tent, spit fire, woodpile, hay and a weapon rack. Peaceful - add an NPC separately.",
+  "tags": [
+    "camp",
+    "decor",
+    "neutral"
+  ],
+  "radius": 5.04,
+  "items": [
+    {
+      "kind": "placeable",
+      "dx": -3.6,
+      "dy": 2.0,
+      "facing": 340.0,
+      "resref": "x2_plc_tent_b"
+    },
+    {
+      "kind": "placeable",
+      "dx": 0.0,
+      "dy": 0.0,
+      "facing": 0.0,
+      "resref": "plc_campfrwspit"
+    },
+    {
+      "kind": "placeable",
+      "dx": 2.6,
+      "dy": -2.6,
+      "facing": 90.0,
+      "resref": "plc_woodpile"
+    },
+    {
+      "kind": "placeable",
+      "dx": -2.6,
+      "dy": -3.0,
+      "facing": 20.0,
+      "resref": "plc_haybundle"
+    },
+    {
+      "kind": "placeable",
+      "dx": 3.6,
+      "dy": 2.6,
+      "facing": 180.0,
+      "resref": "plc_weaponrack"
+    },
+    {
+      "kind": "placeable",
+      "dx": -5.0,
+      "dy": -0.6,
+      "facing": 0.0,
+      "resref": "plc_barrel"
+    },
+    {
+      "kind": "placeable",
+      "dx": -1.8,
+      "dy": 4.0,
+      "facing": 60.0,
+      "resref": "plc_sacks"
+    },
+    {
+      "kind": "placeable",
+      "dx": 1.6,
+      "dy": 2.0,
+      "facing": 250.0,
+      "resref": "plc_bedrolls"
+    }
+  ]
+}

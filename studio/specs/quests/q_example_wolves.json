@@ -1,0 +1,73 @@
+{
+  "tag": "q_example_wolves",
+  "name": "Wolves at the Clearing",
+  "priority": 2,
+  "giver": {
+    "mode": "new",
+    "resref": "hunter_marek",
+    "name": "Hunter Marek",
+    "clone_from": "jolie",
+    "greeting": "Keep your voice down. The wolves are close.",
+    "place": {
+      "area": "mantle",
+      "x": 61.5,
+      "y": 61.5,
+      "facing": 0
+    }
+  },
+  "stages": [
+    {
+      "n": 1,
+      "via": "talk",
+      "journal": "Hunter Marek is losing his traps to a huge alpha wolf haunting Mantle Clearing. He wants it dead.",
+      "offer": "See those claw marks? An alpha wolf has been wrecking my traps. Kill it and I will make it worth your while.",
+      "accept_reply": "I'll hunt it down.",
+      "accept": "Good. It prowls the northern edge of the clearing. Mind its pack.",
+      "decline_reply": "Not today.",
+      "decline": "Then watch your step out there.",
+      "reminder": "Is the alpha dead? I can still hear them howling."
+    },
+    {
+      "n": 2,
+      "via": "kill",
+      "journal": "The alpha wolf is dead. Its pelt should prove the deed to Marek.",
+      "target": {
+        "mode": "new",
+        "resref": "alpha_wolf",
+        "name": "Alpha Wolf",
+        "clone_from": "wolf_dire",
+        "boss": true,
+        "place": {
+          "area": "mantle",
+          "x": 70.5,
+          "y": 98.5,
+          "facing": 270
+        }
+      }
+    },
+    {
+      "n": 3,
+      "via": "pickup",
+      "journal": "You hold the alpha wolf's pelt. Bring it to Hunter Marek.",
+      "item": {
+        "resref": "q_alphapelt",
+        "name": "Alpha Wolf Pelt",
+        "description": "A thick grey pelt, heavy with the musk of the alpha of Mantle Clearing.",
+        "dropped_by": "alpha_wolf"
+      }
+    },
+    {
+      "n": 4,
+      "via": "talk",
+      "journal": "Marek paid you for the alpha wolf's pelt. The clearing is a little safer.",
+      "text": "By the gods, that's the beast! Take this - you've earned every coin.",
+      "reply": "Glad to help.",
+      "done": "The traps are holding again. Thanks to you.",
+      "reward": {
+        "xp_tier": 2,
+        "xp_level": 4,
+        "gold": 120
+      }
+    }
+  ]
+}

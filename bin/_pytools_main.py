@@ -14,7 +14,7 @@ unchanged either way.
 
 Usage: nwn-pytools <subcommand> [args...]
 Subcommands: wiki, area-editor, wiki-activity, check-dlg-integrity,
-             hak-list, tlk-name
+             studio, hak-list, tlk-name
 """
 import importlib.machinery
 import importlib.util
@@ -83,17 +83,28 @@ def _tlk_name(argv):
     return 0
 
 
+def _studio(argv):
+    """Content Studio (the studio/ package, a plain Python package rather than a single script): put its folder
+    on sys.path - the PyInstaller bundle root when frozen, <repo>/studio in a source checkout - and run its CLI."""
+    root = base_dir() / "studio" if getattr(sys, "frozen", False) else base_dir().parent / "studio"
+    sys.path.insert(0, str(root))
+    from tfnstudio.cli import main as studio_main
+    return studio_main(argv)
+
+
 def dispatch(argv):
     """argv is sys.argv-shaped: argv[0] is this program, argv[1] the
     subcommand. Returns a process exit code."""
     if len(argv) < 2:
         print("usage: nwn-pytools <subcommand> [args...]", file=sys.stderr)
-        print("subcommands: %s, hak-list, tlk-name" %
+        print("subcommands: %s, studio, hak-list, tlk-name" %
               ", ".join(SCRIPTS), file=sys.stderr)
         return 2
     sub = argv[1]
     rest = argv[2:]
 
+    if sub == "studio":
+        return _studio(rest)
     if sub == "hak-list":
         return _hak_list(rest)
     if sub == "tlk-name":
