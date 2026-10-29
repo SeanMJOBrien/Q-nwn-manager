@@ -96,6 +96,9 @@ run_pytool_exec() {
   # know the subcommand); otherwise fall back to the binary.
   if [[ $sub == studio ]] && command -v python3 >/dev/null 2>&1; then
     exec python3 "$SCRIPT_DIR/../studio/bin/tfn-studio" "$@"
+  elif [[ $sub == area-editor ]] && command -v python3 >/dev/null 2>&1; then
+    # the dashboard hosts the "Open Content Studio" button; a binary built before it existed lacks it
+    exec python3 "$SCRIPT_DIR/nwn-area-editor" "$@"
   elif [[ -n $PYTOOLS_BIN ]]; then
     exec "$PYTOOLS_BIN" "$sub" "$@"
   else
@@ -926,11 +929,24 @@ cmd_edit_areas() {
 
 cmd_studio() {
   # Content Studio, scoped to the current project (nearest nasher.cfg). With no sub-command it serves the web UI.
-  local root
-  root=$(find_project_root) || {
-    echo "error: not inside an nwn-manager project (no nasher.cfg found above $PWD)" >&2
-    exit 1
-  }
+  local root="" projects_dir
+  projects_dir=$(cd "$SCRIPT_DIR/.." && pwd)/projects
+  if [[ ${1:-} == --project ]]; then
+    [[ -n ${2:-} ]] || { echo "error: --project requires a project name" >&2; exit 2; }
+    root="$projects_dir/$2"
+    [[ -f $root/nasher.cfg ]] || { echo "error: no project '$2' under $projects_dir" >&2; exit 1; }
+    shift 2
+  else
+    root=$(find_project_root) || {
+      echo "error: not inside a project (no nasher.cfg found above $PWD)." >&2
+      echo "Run it inside a project folder, or pick one: $PROG studio --project <name> [serve]" >&2
+      if [[ -d $projects_dir ]]; then
+        echo "Projects under $projects_dir:" >&2
+        for d in "$projects_dir"/*/; do [[ -f ${d}nasher.cfg ]] && echo "  $(basename "$d")" >&2; done
+      fi
+      exit 1
+    }
+  fi
   local sub=${1:-serve}
   [[ $# -gt 0 ]] && shift
   case "$sub" in

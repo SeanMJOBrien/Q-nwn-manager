@@ -162,7 +162,8 @@ def get_text(obj: dict, key: str, default: str = "") -> str:
     if isinstance(v, dict):
         if "0" in v:
             return v["0"]
-        return next(iter(v.values()), default) if v else default
+        # other language entries are text; a bare TLK reference ({"id": N}) has no text of its own
+        return next((x for k, x in v.items() if k != "id" and isinstance(x, str)), default)
     return default if v is None else str(v)
 
 
