@@ -56,11 +56,12 @@ python3 ~/.claude/skills/nwn-web-editor/scripts/nwn_web_editor.py \
 
 | Page | Does |
 |------|------|
-| `/areas` | list all areas; filter by name/tag substring, tileset, and/or type (Outside/Interior/Underground checkboxes, AND'd together — an area's Flags bitmask can match more than one); select via checkboxes; route selection to one of four bulk editors |
+| `/areas` | list all areas; filter by name/tag substring, tileset, and/or type (Outside/Interior/Underground checkboxes, AND'd together — an area's Flags bitmask can match more than one); select via checkboxes; route selection to one of five bulk editors |
 | areas -> Edit scripts | set OnEnter/OnExit/OnHeartbeat/OnUserDefined on every selected area (blank = keep, `-` = clear) |
 | areas -> Edit lighting/fog | set sun/moon ambient/diffuse/fog colors (hex, auto-converted to NWN BGR dwords), fog amounts, FogClipDist, day/night cycle, shadows, wind |
 | areas -> Edit music | set MusicDay/MusicNight/MusicBattle (ambientmusic.2da row indices) and MusicDelay on every selected area |
 | areas -> Edit tags | per-area tag rename, optional resref rename (renames the .are/.git/.gic files and rewrites module.ifo's `Mod_Entry_Area`/`Mod_Area_list`; `.nss` lines quoting the old tag/resref are listed, not edited) |
+| areas -> Edit variables | set (int/float/string) or delete area local variables (the `.git` `VarTable`) on every selected area; an existing variable of the same name is replaced; object/location variables are never touched |
 | `/creatures` | list .utc blueprints; per-creature editor: abilities, HP/AC/saves/CR, appearance fields, feat add/remove, names/tag |
 | `/bics` | recursive .bic browser (point at a servervault); same editor plus Experience, Gold, Age |
 | console `/palettes` | edit the toolset palettes (`*palcus.itp.json`): tree view with rename / move / delete / new folder / add blueprint, and one-click filing of project blueprints missing from a palette. Logic is in `bin/nwn-palette` (also `nwn-manager palette ...` on the CLI). Console only, not the standalone `.bic` editor |

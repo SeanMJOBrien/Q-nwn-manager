@@ -589,6 +589,7 @@ def render_areas(root, query):
                 "<button name='action' value='lighting'>Edit lighting/fog</button>"
                 "<button name='action' value='music'>Edit music</button>"
                 "<button name='action' value='tags'>Edit tags</button>"
+                "<button name='action' value='vars'>Edit variables</button>"
                 "</form>")
     body.append("<p class='note'>%d areas shown.</p>" % len(rows))
     return page("Areas", "".join(body))
@@ -995,6 +996,143 @@ def apply_tags(root, form, dry_run=False):
         return diffs, errors
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors) + scan_html
     return result_page("Tags updated", changed, resrefs, extra)
+
+
+# --- Area local variables (.git VarTable) -----------------------------------
+
+VAR_TYPES = {1: ("int", "int"), 2: ("float", "float"), 3: ("string", "cexostring")}
+VAR_TYPE_BY_NAME = {n: (t, g) for t, (n, g) in VAR_TYPES.items()}
+VAR_NEW_ROWS = 5
+
+
+def area_vars(d):
+    """VarTable entries of a .git dict as [(name, type_id, value)]."""
+    out = []
+    for e in (d.get("VarTable") or {}).get("value", []):
+        out.append((getv(e, "Name", ""), getv(e, "Type", 0), getv(e, "Value")))
+    return out
+
+
+def var_label(type_id):
+    return VAR_TYPES.get(type_id, ("type %s" % type_id,))[0]
+
+
+def render_vars_form(root, resrefs):
+    seen = {}  # name -> {"areas": n, "vals": set of "type=value"}
+    missing = []
+    for res in resrefs:
+        gp = os.path.join(root, res + ".git")
+        if not os.path.exists(gp):
+            missing.append(res)
+            continue
+        for name, t, v in area_vars(load_cached(gp)):
+            ent = seen.setdefault(name, {"areas": 0, "vals": set()})
+            ent["areas"] += 1
+            ent["vals"].add("%s = %s" % (var_label(t), v))
+    existing = "".join(
+        "<tr><td><input type='checkbox' name='delvar' value='%s'></td>"
+        "<td>%s</td><td>%d of %d</td><td class='note'>%s</td></tr>" %
+        (esc(n), esc(n), e["areas"], len(resrefs), esc("; ".join(sorted(e["vals"]))))
+        for n, e in sorted(seen.items()))
+    if not existing:
+        existing = "<tr><td colspan='4'><i>(no variables on the selected areas)</i></td></tr>"
+    type_opts = "".join("<option>%s</option>" % n for n in VAR_TYPE_BY_NAME)
+    new_rows = "".join(
+        "<tr><td><input type='text' name='set_name_%d'></td>"
+        "<td><select name='set_type_%d'>%s</select></td>"
+        "<td><input type='text' name='set_value_%d'></td></tr>" % (i, i, type_opts, i)
+        for i in range(VAR_NEW_ROWS))
+    warn = ("<p class='err'>No .git file for: %s (skipped)</p>" %
+            esc(", ".join(missing))) if missing else ""
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>%s"
+            "<form method='post' action='/areas/vars/preview'>%s"
+            "<fieldset><legend>Existing variables</legend>"
+            "<table><tr><th>Delete</th><th>Name</th><th>On areas</th>"
+            "<th>Current value(s)</th></tr>%s</table></fieldset>"
+            "<fieldset><legend>Set variables</legend>"
+            "<table><tr><th>Name</th><th>Type</th><th>Value</th></tr>%s</table>"
+            "<p class='note'>Sets the variable on every selected area, "
+            "replacing it if it already exists (including its type). Blank "
+            "name rows are ignored. Object/location variables are never "
+            "touched.</p></fieldset>"
+            "<input type='submit' value='Apply to selected areas'></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), warn, hidden_resrefs(resrefs),
+             existing, new_rows))
+    return page("Bulk edit area variables", body)
+
+
+def parse_var_sets(form):
+    """-> ([(name, type_id, gff_type, value)], [errors]) from set_* rows."""
+    sets, errors = [], []
+    for i in range(VAR_NEW_ROWS):
+        name = form.get("set_name_%d" % i, [""])[0].strip()
+        if not name:
+            continue
+        tname = form.get("set_type_%d" % i, ["int"])[0]
+        raw = form.get("set_value_%d" % i, [""])[0]
+        type_id, gff_type = VAR_TYPE_BY_NAME.get(tname, VAR_TYPE_BY_NAME["int"])
+        try:
+            value = (int(raw.strip() or "0") if tname == "int" else
+                     float(raw.strip() or "0") if tname == "float" else raw)
+        except ValueError:
+            errors.append("%s: %r is not a valid %s" % (name, raw, tname))
+            continue
+        sets.append((name, type_id, gff_type, value))
+    return sets, errors
+
+
+def apply_vars(root, form, dry_run=False):
+    resrefs, changed, errors, diffs = form.get("res", []), [], [], []
+    sets, errors = parse_var_sets(form)
+    deletes = set(form.get("delvar", []))
+    for res in resrefs:
+        path = os.path.join(root, res + ".git")
+        if not os.path.exists(path):
+            errors.append("%s: no .git file (skipped)" % res)
+            continue
+        d = gff_load(path)
+        vt = d.get("VarTable")
+        if not (isinstance(vt, dict) and isinstance(vt.get("value"), list)):
+            vt = d["VarTable"] = {"type": "list", "value": []}
+        entries = vt["value"]
+        touched = False
+        for e in list(entries):
+            name = getv(e, "Name", "")
+            if name in deletes and getv(e, "Type", 0) in VAR_TYPES:
+                touched = True
+                diffs.append((res, name, "%s = %s" % (var_label(getv(e, "Type", 0)),
+                                                      getv(e, "Value")), "(deleted)"))
+                entries.remove(e)
+        for name, type_id, gff_type, value in sets:
+            cur = next((e for e in entries if getv(e, "Name", "") == name), None)
+            if cur is not None and getv(cur, "Type", 0) not in VAR_TYPES:
+                errors.append("%s: %s is an object/location variable (skipped)"
+                              % (res, name))
+                continue
+            old = ("%s = %s" % (var_label(getv(cur, "Type", 0)), getv(cur, "Value"))
+                   if cur is not None else None)
+            new = "%s = %s" % (var_label(type_id), value)
+            if old == new:
+                continue
+            touched = True
+            diffs.append((res, name, old, new))
+            entry = {"__struct_id": 0,
+                     "Name": {"type": "cexostring", "value": name},
+                     "Type": {"type": "dword", "value": type_id},
+                     "Value": {"type": gff_type, "value": value}}
+            if cur is None:
+                entries.append(entry)
+            else:
+                entries[entries.index(cur)] = entry
+        if touched:
+            changed.append(res)
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
+    if dry_run:
+        return diffs, errors
+    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
+    return result_page("Variables updated", changed, resrefs, extra)
 
 
 def result_page(title, changed, selected, extra=""):
@@ -1658,7 +1796,8 @@ class Handler(BaseHTTPRequestHandler):
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
                           "music": render_music_form,
-                          "tags": render_tags_form}.get(action, render_scripts_form)
+                          "tags": render_tags_form,
+                          "vars": render_vars_form}.get(action, render_scripts_form)
                 self._send(render(self.root, resrefs))
             elif path == "/creatures":
                 self._send(render_creatures(self.root, query))
@@ -1712,7 +1851,8 @@ class Handler(BaseHTTPRequestHandler):
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
                           "music": render_music_form,
-                          "tags": render_tags_form}[action]
+                          "tags": render_tags_form,
+                          "vars": render_vars_form}[action]
                 self._send(render(self.root, resrefs))
             elif path == "/areas/scripts/preview":
                 resrefs = form.get("res", [])
@@ -1740,6 +1880,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(render_diff_preview(
                     "Edit area tags / resrefs", diffs, resrefs, form,
                     "/areas/tags/apply", errors, scan))
+            elif path == "/areas/vars/preview":
+                resrefs = form.get("res", [])
+                diffs, errors = apply_vars(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Bulk edit area variables", diffs, resrefs, form,
+                    "/areas/vars/apply", errors))
+            elif path == "/areas/vars/apply":
+                self._send(apply_vars(self.root, form))
             elif path == "/areas/scripts/apply":
                 self._send(apply_scripts(self.root, form))
             elif path == "/areas/lighting/apply":
