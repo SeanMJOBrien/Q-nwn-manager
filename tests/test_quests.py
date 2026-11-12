@@ -42,6 +42,12 @@ if cmd == "schema":
     out(True, {"definitions": {"QuestInput": {"properties": {"name": {"type": "string"}}},
                                "StageInput": {"properties": {"do": {"enum": ["talk"]}}}}})
 project, dest = opt("--project"), opt("--out")
+if cmd == "verify":
+    if os.environ.get("FAKE_QUEST_UNCOMPLETABLE"):
+        out(True, {"tag": args[1], "completable": False,
+                   "gaps": ["Quest-giver NPC is in unreachable area 'cellar'"],
+                   "journal": {"errors": [], "warnings": []}})
+    out(True, {"tag": args[1], "completable": True, "gaps": [], "journal": {"errors": [], "warnings": []}})
 if os.environ.get("FAKE_QUEST_FAIL"):
     out(False, os.environ["FAKE_QUEST_FAIL"])
 if cmd == "remove":
@@ -133,7 +139,7 @@ class FakeCliMixin:
             fh.write(FAKE_CLI)
         cls._env = {k: os.environ.get(k) for k in
                     ("NWN_QUEST_CLI", "NODE", "NIM_FOLDER_NWTOOLS", "FAKE_QUEST_FAIL",
-                     "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT")}
+                     "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE")}
         os.environ.update({"NWN_QUEST_CLI": cli, "NODE": sys.executable,
                            "NIM_FOLDER_NWTOOLS": cls.cli_dir})
 
@@ -159,7 +165,7 @@ class BridgeTests(FakeCliMixin, unittest.TestCase):
     def setUp(self):
         self.proj, self.unpacked = make_project()
         self.addCleanup(shutil.rmtree, self.proj, ignore_errors=True)
-        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT"):
+        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE"):
             os.environ.pop(key, None)
 
     def test_tag_follows_the_builders_rule(self):
@@ -289,7 +295,7 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
 
     def setUp(self):
         self.c = Client(self.port, "/quests")
-        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT"):
+        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE"):
             os.environ.pop(key, None)
 
     def read(self, name):
@@ -342,6 +348,8 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
         written = {w["name"]: w["new"] for w in out["applied"]["written"]}
         self.assertEqual(written, {"module.jrl.json": True, "ned.utc.json": False, "q_act.nss": True})
         self.assertEqual(out["applied"]["unchanged"], 1)            # module.ifo.json was identical
+        self.assertTrue(out["applied"]["verify"]["checked"])        # completion check runs after the write
+        self.assertTrue(out["applied"]["verify"]["completable"])
         ned = json.loads(self.read("ned.utc.json"))
         self.assertEqual(ned["Conversation"]["value"], "dq_ned")
         self.assertIn('"value": 1.0', self.read("ned.utc.json"))    # float kept as nasher writes it
@@ -356,6 +364,13 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
             self.assertEqual(fh.read(), before)                      # undo point = the file before the quest
         spec = json.loads(self.c.get("/quests/spec?tag=q_wolves"))["spec"]
         self.assertEqual(spec["giver"], "farmer_ned")
+
+    def test_9_an_uncompletable_build_is_written_and_the_gap_is_reported(self):
+        os.environ["FAKE_QUEST_UNCOMPLETABLE"] = "1"
+        out = self.post("/build", spec=json.dumps({"name": "Cellar", "giver": "farmer_ned"}), new="1")
+        self.assertTrue(out["ok"], out)
+        self.assertFalse(out["applied"]["verify"]["completable"])
+        self.assertIn("unreachable area", out["applied"]["verify"]["gaps"][0])
 
     def test_6_a_new_quest_cannot_replace_an_existing_one(self):
         out = self.post("/build", spec=json.dumps({"name": "Wolves", "giver": "farmer_ned"}), new="1")

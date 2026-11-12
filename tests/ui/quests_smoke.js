@@ -61,6 +61,7 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await page.waitForFunction(() => /^Built: /.test((document.querySelector('.q-side h3') || {}).innerText || ''), null, { timeout: 120000 });
   check('build reports written files', /file\(s\) written/.test(await page.locator('.q-side').innerText()));
   check('quest scripts were compile-checked', await page.locator('.q-side p.ok', { hasText: 'compiled with nwnsc' }).count() === 1);
+  check('the completion check ran after the build', await page.locator('.q-side p', { hasText: 'Checked: the quest' }).count() === 1, await page.locator('.q-side p', { hasText: 'Checked:' }).allTextContents().then(function (t) { return t.join(' | '); }));
   check('the quest is listed as in the module', await page.locator('.q-item', { hasText: 'Smoke Test Errand' }).locator('.pill.ok').count() === 1);
   await page.screenshot({ path: OUT + '/quests-built.png', fullPage: true });
 

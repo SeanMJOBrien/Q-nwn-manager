@@ -399,6 +399,16 @@
     } else {
       out.push(h('p', { class: 'warn' }, 'The scripts were not compile-checked here; Build module compiles them.'));
     }
+    var v = applied.verify;
+    if (v && v.checked) {
+      var gaps = (v.gaps || []).concat((v.journal && v.journal.errors || []).map(function (e) { return e.message; }));
+      out.push(v.completable && !gaps.length
+        ? h('p', { class: 'ok' }, 'Checked: the quest can be completed.')
+        : h('div', {}, h('p', { class: 'err' }, 'Checked: the quest cannot be completed yet:'), gaps.map(function (g) { return h('p', { class: 'err' }, String(g)); })));
+      (v.journal && v.journal.warnings || []).forEach(function (w) { out.push(h('p', { class: 'warn' }, String(w.message))); });
+    } else if (v) {
+      out.push(h('p', { class: 'warn' }, 'The completion check did not run: ' + v.error));
+    }
     out.push(h('details', {}, h('summary', { class: 'note' }, 'Files'),
       h('ul', {}, applied.written.map(function (f) { return h('li', {}, f.name, f['new'] ? ' (new)' : ''); }))));
     return out;

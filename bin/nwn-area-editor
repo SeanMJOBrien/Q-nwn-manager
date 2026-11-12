@@ -3681,6 +3681,7 @@ def quest_build(proj, spec):
                                  "written:\n" + compiled["output"][-1500:])
         applied = apply_quest_files(proj, out, files, started)
     applied["compile"] = compiled
+    applied["verify"] = lib.verify(proj.unpacked, result.get("tag") or lib.spec_tag(spec))
     saved = dict(spec)
     saved["tag"] = result.get("tag") or lib.spec_tag(spec)
     lib.save_spec(proj.root, saved)

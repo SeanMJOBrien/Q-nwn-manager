@@ -412,6 +412,18 @@ def stage_build(unpacked, spec, out_dir):
                         "--out", out_dir, "--no-compile"])
 
 
+def verify(unpacked, tag):
+    """Can the built quest be completed? Read-only. Never raises: a builder that cannot answer is
+    reported as {"checked": False, "error": ...} so a good build is not hidden by a failed check."""
+    try:
+        with project_lock(unpacked):
+            res = run_cli(["verify", tag, "--project", unpacked])
+    except QuestError as exc:
+        return {"checked": False, "error": str(exc)}
+    res["checked"] = True
+    return res
+
+
 def stage_remove(unpacked, tag, out_dir):
     if not TAG_RE.match(tag or ""):
         raise QuestError("bad quest tag")
