@@ -129,6 +129,56 @@ def cli_env():
     return env
 
 
+_version_cache = {}
+
+
+def builder_version(cli):
+    """{version, schemaHash, bundled} of a builder file, or None when it cannot answer
+    (an older builder without the `version` command, or no node). Cached per file and mtime."""
+    node = node_path()
+    if not cli or not node:
+        return None
+    try:
+        key = (cli, os.path.getmtime(cli))
+    except OSError:
+        return None
+    if key not in _version_cache:
+        try:
+            proc = subprocess.run([node, cli, "version"], capture_output=True, text=True,
+                                  timeout=20, cwd=_cli_cwd(cli))
+            doc = json.loads(proc.stdout)
+            _version_cache[key] = doc["result"] if doc.get("ok") else None
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            _version_cache[key] = None
+    return _version_cache[key]
+
+
+def checkout_cli():
+    """A built Q-nwn-mcp checkout next to this repo, if any."""
+    for name in ("Q-nwn-mcp", "nwn-mcp"):
+        cand = os.path.join(os.path.dirname(_REPO), name, "dist", "cli", "quest.js")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def version_note(cli):
+    """A warning when the builder in use differs from the checkout beside this repo (the bundle is stale)."""
+    other = checkout_cli()
+    if not cli or not other or os.path.abspath(cli) == os.path.abspath(other):
+        return None
+    mine, theirs = builder_version(cli), builder_version(other)
+    if mine is None:
+        return ("the builder in use (%s) cannot report its version; it may be older than the "
+                "checkout beside this repo - refresh nwn-tools/quest-cli.mjs" % os.path.basename(cli))
+    if theirs and mine["schemaHash"] != theirs["schemaHash"]:
+        return ("the builder in use (%s, quest spec %s) differs from the Q-nwn-mcp checkout beside "
+                "this repo (%s, spec %s): run `npm run quest:bundle` there and copy "
+                "bundle/quest-cli.mjs over nwn-tools/quest-cli.mjs"
+                % (mine["version"], mine["schemaHash"], theirs["version"], theirs["schemaHash"]))
+    return None
+
+
 def info():
     problems = []
     if not node_path():
@@ -148,7 +198,12 @@ def info():
     if not (_tool("nwnsc", "nwnsc") and base_scripts_dir()):
         notes.append("nwnsc or the base scripts were not found: quest scripts are not "
                      "compile-checked before they are written (Build module still compiles them).")
-    return {"ready": not problems, "problems": problems, "notes": notes, "cli": cli_path()}
+    cli = cli_path()
+    stale = version_note(cli) if cli else None
+    if stale:
+        notes.append(stale)
+    return {"ready": not problems, "problems": problems, "notes": notes, "cli": cli,
+            "version": builder_version(cli) if cli else None}
 
 
 def project_lock(unpacked):

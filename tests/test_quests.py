@@ -38,6 +38,10 @@ def out(ok, payload):
 def opt(name):
     return args[args.index(name) + 1] if name in args else None
 cmd = args[0]
+if cmd == "version":
+    marker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hash.txt")
+    h = open(marker).read().strip() if os.path.exists(marker) else "aaaaaaaaaaaa"
+    out(True, {"version": "1.0", "schemaHash": h, "bundled": False})
 if cmd == "schema":
     out(True, {"definitions": {"QuestInput": {"properties": {"name": {"type": "string"}}},
                                "StageInput": {"properties": {"do": {"enum": ["talk"]}}}}})
@@ -178,6 +182,32 @@ class BridgeTests(FakeCliMixin, unittest.TestCase):
         self.assertEqual(lib.cli_path({"NWN_QUEST_CLI": given}), given)     # the variable wins
         self.assertTrue(lib._cli_cwd(vendored).endswith("nwn-tools"))
         self.assertEqual(lib._cli_cwd(given), self.cli_dir)
+
+    def test_a_stale_builder_is_noted_against_the_checkout_beside_the_repo(self):
+        lib = CONSOLE.quests_lib()
+        fake = os.path.join(self.cli_dir, "dist", "cli", "quest.js")
+        old_dir = tempfile.mkdtemp(prefix="qnm_oldcli_")
+        old = os.path.join(old_dir, "quest-cli.mjs")
+        shutil.copy(fake, old)
+        original = lib.checkout_cli
+        lib.checkout_cli = lambda: fake                      # pretend the fake is the checkout's builder
+        lib._version_cache.clear()
+        try:
+            self.assertEqual(lib.builder_version(fake)["schemaHash"], "aaaaaaaaaaaa")
+            self.assertIsNone(lib.version_note(fake))        # the same file: nothing to compare
+            self.assertIsNone(lib.version_note(old))         # same schema hash: current
+            with open(os.path.join(old_dir, "hash.txt"), "w") as fh:
+                fh.write("bbbbbbbbbbbb")
+            lib._version_cache.clear()
+            note = lib.version_note(old)
+            self.assertIn("bbbbbbbbbbbb", note)
+            self.assertIn("npm run quest:bundle", note)
+            lib.checkout_cli = lambda: None
+            self.assertIsNone(lib.version_note(old))         # no checkout to compare with
+        finally:
+            lib.checkout_cli = original
+            lib._version_cache.clear()
+            shutil.rmtree(old_dir, ignore_errors=True)
 
     def test_tag_follows_the_builders_rule(self):
         self.assertEqual(QUESTS.tag_from_name("Wolves at the Fold"), "q_wolves_at_the_fold")

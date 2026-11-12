@@ -7821,6 +7821,7 @@ var require_dist = __commonJS({
 
 // src/cli/quest.ts
 init_define_QUEST_SCHEMA();
+import { createHash } from "crypto";
 import fs13 from "fs/promises";
 import path17 from "path";
 
@@ -43954,14 +43955,17 @@ async function loadTarget(target, out2, writes) {
     if (!await isProjectDir(p)) {
       const source = await sourceDirOf(p);
       if (!source) {
-        throw new Error(`${p} is neither a module project (project.json) nor module source (module.ifo.json, or unpacked/ with one)`);
+        throw new Error(
+          `${p} is neither a module project (project.json) nor module source (module.ifo.json, or unpacked/ with one)`
+        );
       }
       if (writes && !out2) {
         throw new Error("a source directory is never written directly: pass --out <dir> to receive the changed files");
       }
       if (out2) {
         const outAbs = path17.resolve(out2);
-        if (outAbs === source || outAbs.startsWith(source + path17.sep)) throw new Error("--out must be outside the source directory");
+        if (outAbs === source || outAbs.startsWith(source + path17.sep))
+          throw new Error("--out must be outside the source directory");
         if ((await fs13.readdir(outAbs).catch(() => [])).length > 0) throw new Error(`--out ${outAbs} is not empty`);
       }
       await loadSourceDir(source, { out: writes ? out2 : void 0 });
@@ -43992,9 +43996,14 @@ async function verifyQuest(tag) {
     const quest = comp.quests?.find(
       (q) => String(q.tag).toLowerCase() === tag.toLowerCase()
     );
-    if (!quest) throw new Error(`no journal quest with tag ${tag} in this module (${String(comp.error ?? comp.message ?? "build it first")})`);
+    if (!quest)
+      throw new Error(
+        `no journal quest with tag ${tag} in this module (${String(comp.error ?? comp.message ?? "build it first")})`
+      );
     const journal = await call("verify_journal");
-    const mine = (list) => (list ?? []).filter((f) => (f.message ?? "").toLowerCase().includes(tag.toLowerCase()));
+    const mine = (list) => (list ?? []).filter(
+      (f) => (f.message ?? "").toLowerCase().includes(tag.toLowerCase())
+    );
     return {
       tag: quest.tag,
       name: quest.name,
@@ -44011,6 +44020,17 @@ async function verifyQuest(tag) {
 }
 async function main() {
   const { cmd, arg, project, out: outDir, dryRun, compile } = parse3(process.argv.slice(2));
+  if (cmd === "version") {
+    const schema = typeof define_QUEST_SCHEMA_default !== "undefined" ? define_QUEST_SCHEMA_default : JSON.parse(
+      await fs13.readFile(path17.join(import.meta.dirname, "..", "..", "docs", "quest-spec.schema.json"), "utf8")
+    );
+    const version2 = true ? "1.4.0" : JSON.parse(await fs13.readFile(path17.join(import.meta.dirname, "..", "..", "package.json"), "utf8")).version;
+    out(true, {
+      version: version2,
+      schemaHash: createHash("sha256").update(JSON.stringify(schema)).digest("hex").slice(0, 12),
+      bundled: typeof define_QUEST_SCHEMA_default !== "undefined"
+    });
+  }
   if (cmd === "schema") {
     if (typeof define_QUEST_SCHEMA_default !== "undefined") out(true, define_QUEST_SCHEMA_default);
     const schemaPath = path17.join(import.meta.dirname, "..", "..", "docs", "quest-spec.schema.json");
@@ -44032,7 +44052,10 @@ async function main() {
     out(true, await verifyQuest(arg));
   }
   if (!["build", "remove"].includes(cmd) || !arg || !project) {
-    out(false, "usage: quest build <spec.json> --project <dir|.mod> [--dry-run] [--out <dir>] [--no-compile] | quest remove <tag> --project <dir|.mod> [--out <dir>] | quest verify <tag> --project <dir|.mod> | quest normalize <spec.json> | quest schema");
+    out(
+      false,
+      "usage: quest build <spec.json> --project <dir|.mod> [--dry-run] [--out <dir>] [--no-compile] | quest remove <tag> --project <dir|.mod> [--out <dir>] | quest verify <tag> --project <dir|.mod> | quest version | quest normalize <spec.json> | quest schema"
+    );
   }
   const writes = cmd === "remove" || !dryRun;
   const isSource = await loadTarget(project, outDir, writes);
