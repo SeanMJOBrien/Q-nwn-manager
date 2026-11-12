@@ -57,7 +57,8 @@ if cmd == "remove":
     with open(os.path.join(dest, "module.jrl.json"), "w") as fh:
         json.dump(jrl, fh)
     out(True, {"tag": args[1], "variablesRemoved": 2,
-               "source": {"files": ["module.jrl.json"], "removed": []}})
+               "source": {"files": ["module.jrl.json"],
+                          "removed": ["dq_ned.dlg.json"] if os.path.exists(os.path.join(project, "dq_ned.dlg.json")) else []}})
 with open(args[1]) as fh:
     spec = json.load(fh)
 tag = spec.get("tag") or "q_" + spec["name"].lower().replace(" ", "_")
@@ -381,8 +382,15 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
         self.assertEqual(again["applied"]["written"], [])            # same result: nothing rewritten
 
     def test_7_remove_keeps_the_draft_then_delete_drops_it(self):
+        dlg = os.path.join(self.unpacked, "dq_ned.dlg.json")      # the conversation the quest created
+        with open(dlg, "w") as fh:
+            fh.write('{"__data_type": "DLG "}')
         out = self.post("/remove", tag="q_wolves")
         self.assertTrue(out["ok"], out)
+        self.assertEqual(out["applied"]["deleted"], ["dq_ned.dlg.json"])
+        self.assertFalse(os.path.exists(dlg))                      # deleted through the history...
+        names = [h["name"] for h in CONSOLE.common().list_history(CONSOLE.common().history_dir(self.proj))]
+        self.assertIn("dq_ned.dlg.json", names)                    # ...so History can restore it
         self.assertEqual([w["name"] for w in out["applied"]["written"]], ["module.jrl.json"])
         self.assertEqual(out["quests"], [{"tag": "q_wolves", "name": "Wolves", "saved": True,
                                           "built": False, "entries": 0}])

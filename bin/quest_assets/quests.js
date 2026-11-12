@@ -392,7 +392,7 @@
 
   function fileList(applied) {
     if (!applied) return null;
-    var out = [h('p', {}, applied.written.length + ' file(s) written' + (applied.unchanged ? ', ' + applied.unchanged + ' already up to date' : '') + '. ',
+    var out = [h('p', {}, applied.written.length + ' file(s) written' + (applied.deleted && applied.deleted.length ? ', ' + applied.deleted.length + ' deleted' : '') + (applied.unchanged ? ', ' + applied.unchanged + ' already up to date' : '') + '. ',
       h('a', { href: base.replace(/\/quests$/, '/history') }, 'History'), ' can undo them.')];
     if (applied.compile) {
       out.push(h('p', { class: applied.compile.ok ? 'ok' : 'err' }, applied.compile.checked + ' quest script(s) compiled with nwnsc before writing.'));
@@ -410,7 +410,8 @@
       out.push(h('p', { class: 'warn' }, 'The completion check did not run: ' + v.error));
     }
     out.push(h('details', {}, h('summary', { class: 'note' }, 'Files'),
-      h('ul', {}, applied.written.map(function (f) { return h('li', {}, f.name, f['new'] ? ' (new)' : ''); }))));
+      h('ul', {}, applied.written.map(function (f) { return h('li', {}, f.name, f['new'] ? ' (new)' : ''); })
+        .concat((applied.deleted || []).map(function (n) { return h('li', {}, n, ' (deleted)'); })))));
     return out;
   }
 

@@ -3638,23 +3638,43 @@ def quest_target(proj, name):
     return os.path.join(proj.unpacked, name)
 
 
-def apply_quest_files(proj, staged_dir, files, started):
+def file_delete(path):
+    """Delete a project file the way a save would: stale-edit refusal and a history
+    snapshot first, so History can bring it back (restore recreates the file)."""
+    guard_write(path)
+    os.remove(path)
+    invalidate(path)
+
+
+def apply_quest_files(proj, staged_dir, files, started, removed=()):
     """Copy the builder's staged files into the project. A file that changed
     after the builder started reading the project is a conflict: all files are
     checked before the first is written, so nothing is half applied."""
     lib = quests_lib()
     _req.rendered = started
     changes = lib.staged_changes(staged_dir, files, lambda name: quest_target(proj, name))
+    gone = []
+    for name in removed:
+        if os.path.basename(name) != name or name.startswith("."):
+            raise lib.QuestError("unexpected removed file name %r" % name)
+        target = quest_target(proj, name)
+        if os.path.isfile(target):
+            gone.append(target)
     for change in changes:
         common().check_stale(os.path.abspath(change["target"]), started)
+    for target in gone:
+        common().check_stale(os.path.abspath(target), started)
     for change in changes:
         if change["kind"] == "json":
             json_save(change["target"], change["data"])
         else:
             text_save(change["target"], change["data"])
         invalidate(change["target"])
+    for target in gone:
+        file_delete(target)
     return {"written": [{"name": c["name"], "new": c["new"]} for c in changes],
-            "unchanged": len(files) - len(changes)}
+            "unchanged": len(files) - len(changes),
+            "deleted": [os.path.basename(t) for t in gone]}
 
 
 def quest_refuse_duplicate(proj, spec):
@@ -3679,7 +3699,8 @@ def quest_build(proj, spec):
         if compiled and not compiled["ok"]:
             raise lib.QuestError("the quest scripts did not compile, so nothing was "
                                  "written:\n" + compiled["output"][-1500:])
-        applied = apply_quest_files(proj, out, files, started)
+        applied = apply_quest_files(proj, out, files, started,
+                                    (result.get("source") or {}).get("removed") or [])
     applied["compile"] = compiled
     applied["verify"] = lib.verify(proj.unpacked, result.get("tag") or lib.spec_tag(spec))
     saved = dict(spec)
@@ -3694,7 +3715,8 @@ def quest_remove(proj, tag):
     with tempfile.TemporaryDirectory(prefix="nwnmgr-quest-out-") as out:
         result = lib.stage_remove(proj.unpacked, tag, out)
         files = (result.get("source") or {}).get("files") or []
-        applied = apply_quest_files(proj, out, files, started)
+        applied = apply_quest_files(proj, out, files, started,
+                                    (result.get("source") or {}).get("removed") or [])
     applied["compile"] = {"checked": 0, "ok": True, "output": ""}
     return result, applied
 
