@@ -14,7 +14,7 @@ unchanged either way.
 
 Usage: nwn-pytools <subcommand> [args...]
 Subcommands: wiki, area-editor, wiki-activity, check-dlg-integrity,
-             hak-list, tlk-name
+             palette, hak-list, tlk-name
 """
 import importlib.machinery
 import importlib.util
@@ -27,6 +27,7 @@ SCRIPTS = {
     "area-editor": "nwn-area-editor",
     "wiki-activity": "nwn-wiki-activity",
     "check-dlg-integrity": "check-dlg-integrity",
+    "palette": "nwn-palette",
 }
 
 

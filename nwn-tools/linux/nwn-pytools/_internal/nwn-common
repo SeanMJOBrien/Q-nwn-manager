@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""nwn-common - safety helpers shared by the console (bin/nwn-area-editor) and
+the palette tool (bin/nwn-palette). Loaded by path like the other bin/ scripts
+(no .py extension), so it works from the frozen nwn-pytools bundle too.
+
+  - CsrfGuard:   per-browser-session CSRF tokens for state-changing POST forms.
+  - check_stale: refuse to overwrite a file that changed after the form that
+                 is saving it was rendered (two tabs, or an unpack mid-edit).
+  - history:     timestamped pre-edit snapshots of every file the editors
+                 write, plus list/restore - undo beyond the one-time .bak.
+
+The standalone skill script (skills/nwn-web-editor/scripts/nwn_web_editor.py)
+is installed on its own, outside this repo, so it can't import this module and
+carries a small copy of the CSRF and stale-edit logic instead.
+"""
+
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import shutil
+import time
+
+# --- CSRF ---------------------------------------------------------------------
+
+COOKIE_NAME = "qnm_sid"
+FIELD_CSRF = "_csrf"
+FIELD_RENDERED = "_rendered"
+
+_POST_FORM = re.compile(r"(<form\b[^>]*\bmethod=['\"]post['\"][^>]*>)", re.I)
+
+
+class CsrfGuard:
+    """Session cookie + HMAC token. The cookie (SameSite=Strict, HttpOnly)
+    holds a random session id; each form carries HMAC(secret, session id). A
+    cross-site page can neither read the token nor, with Strict cookies, send
+    the session, so a forged POST fails verification. The secret is random per
+    server process, so tokens die with a restart (the user just reloads)."""
+
+    def __init__(self):
+        self._secret = secrets.token_bytes(32)
+
+    def new_sid(self):
+        return secrets.token_hex(16)
+
+    def token(self, sid):
+        return hmac.new(self._secret, sid.encode(), hashlib.sha256).hexdigest()
+
+    def verify(self, sid, token):
+        return bool(sid and token) and hmac.compare_digest(
+            self.token(sid), str(token))
+
+    @staticmethod
+    def sid_from_cookie(header):
+        for part in (header or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == COOKIE_NAME and re.fullmatch(r"[0-9a-f]{32}", value):
+                return value
+        return ""
+
+    @staticmethod
+    def cookie_header(sid):
+        return "%s=%s; Path=/; HttpOnly; SameSite=Strict" % (COOKIE_NAME, sid)
+
+    def inject(self, html, sid, rendered=None):
+        """Add the hidden token (and render time) after every POST <form>."""
+        hidden = ("<input type='hidden' name='%s' value='%s'>"
+                  "<input type='hidden' name='%s' value='%.6f'>" % (
+                      FIELD_CSRF, self.token(sid), FIELD_RENDERED,
+                      time.time() if rendered is None else rendered))
+        return _POST_FORM.sub(lambda m: m.group(1) + hidden, html)
+
+
+def rendered_from_form(form):
+    """Earliest render time among the submitted `_rendered` values. A preview
+    page re-emits the original form's value next to its own, and the earliest
+    is the one that matters: it predates the user's first look at the data."""
+    vals = []
+    for v in form.get(FIELD_RENDERED, []):
+        try:
+            vals.append(float(v))
+        except ValueError:
+            pass
+    return min(vals) if vals else None
+
+
+# --- stale-edit detection -------------------------------------------------------
+
+class StaleEditError(Exception):
+    pass
+
+
+def check_stale(path, rendered, written=()):
+    """Raise if `path` was modified after the form was rendered. Files this
+    request already wrote are exempt (an apply may save one file twice)."""
+    if rendered is None or os.path.abspath(path) in written:
+        return
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return
+    if mtime > rendered:
+        raise StaleEditError(
+            "%s changed on disk after this page was loaded (another tab, an "
+            "unpack, or another tool). Reload the page and redo the edit so "
+            "nothing is overwritten." % os.path.basename(path))
+
+
+# --- history (undo) ---------------------------------------------------------------
+
+KEEP_PER_FILE = 10
+
+
+def history_dir(project_root):
+    """<project>/.nwn-manager/history for a real nwn-manager project (one with
+    a nasher.cfg); None for an ad-hoc --dir so stray folders aren't littered."""
+    if project_root and os.path.isfile(os.path.join(project_root, "nasher.cfg")):
+        return os.path.join(project_root, ".nwn-manager", "history")
+    return None
+
+
+def _key(path):
+    full = os.path.abspath(path)
+    return "%s-%s" % (hashlib.sha1(full.encode()).hexdigest()[:10],
+                      os.path.basename(full))
+
+
+def _digest(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def snapshot(path, hist_root, keep=KEEP_PER_FILE):
+    """Copy the current contents of `path` into the history before it is
+    overwritten. No-op when the file is absent or identical to the newest
+    snapshot. Returns the snapshot path or None."""
+    if not hist_root or not os.path.isfile(path):
+        return None
+    folder = os.path.join(hist_root, _key(path))
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, "path.txt"), "w", encoding="utf-8") as fh:
+        fh.write(os.path.abspath(path))
+    existing = sorted(f for f in os.listdir(folder) if f.endswith(".snap"))
+    if existing and _digest(os.path.join(folder, existing[-1])) == _digest(path):
+        return None
+    now = time.time()
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now))
+    name = "%s-%03d.snap" % (stamp, int((now % 1) * 1000))
+    while name in existing:  # same millisecond
+        name = name.replace(".snap", "x.snap")
+    dest = os.path.join(folder, name)
+    shutil.copy2(path, dest)
+    existing.append(name)
+    for old in sorted(existing)[:-keep]:
+        os.remove(os.path.join(folder, old))
+    return dest
+
+
+def list_history(hist_root):
+    """[{key, name, path, stamp, snap, size, exists}] newest first."""
+    out = []
+    if not hist_root or not os.path.isdir(hist_root):
+        return out
+    for key in os.listdir(hist_root):
+        folder = os.path.join(hist_root, key)
+        try:
+            with open(os.path.join(folder, "path.txt"), encoding="utf-8") as fh:
+                orig = fh.read().strip()
+        except OSError:
+            continue
+        for f in os.listdir(folder):
+            if f.endswith(".snap"):
+                snap = os.path.join(folder, f)
+                out.append({"key": key, "name": os.path.basename(orig),
+                            "path": orig, "stamp": f[:-len(".snap")],
+                            "snap": snap, "size": os.path.getsize(snap),
+                            "exists": os.path.exists(orig)})
+    return sorted(out, key=lambda e: e["stamp"], reverse=True)
+
+
+def restore(hist_root, key, stamp):
+    """Put snapshot `stamp` of file `key` back. The current contents are
+    snapshotted first so a restore can itself be undone. Returns the path."""
+    if not re.fullmatch(r"[0-9a-f]{10}-[^/\\]+", key) \
+            or not re.fullmatch(r"\d{8}T\d{6}-\d{3}x*", stamp):
+        raise ValueError("bad history reference")
+    folder = os.path.join(hist_root, key)
+    snap = os.path.join(folder, stamp + ".snap")
+    if not os.path.isfile(snap):
+        raise ValueError("no such snapshot")
+    with open(os.path.join(folder, "path.txt"), encoding="utf-8") as fh:
+        target = fh.read().strip()
+    snapshot(target, hist_root)
+    tmp = target + ".tmp"
+    shutil.copyfile(snap, tmp)
+    os.replace(tmp, target)
+    return target

@@ -72,6 +72,40 @@ SERVER = None           # the ThreadingHTTPServer (for the /shutdown "Stop" butt
 _req = threading.local()
 
 
+def _load_sibling(name):
+    """Load a sibling bin/ script (no .py extension) by path - the same
+    technique _pytools_main.py uses, so it also works frozen."""
+    import importlib.machinery
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
+    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+_COMMON = None
+
+
+def common():
+    """bin/nwn-common: CSRF guard, stale-edit check, edit history."""
+    global _COMMON
+    if _COMMON is None:
+        _COMMON = _load_sibling("nwn-common")
+    return _COMMON
+
+
+_CSRF_GUARD = None
+
+
+def csrf_guard():
+    global _CSRF_GUARD
+    if _CSRF_GUARD is None:
+        _CSRF_GUARD = common().CsrfGuard()
+    return _CSRF_GUARD
+
+
 def _slug():
     return getattr(_req, "slug", None)
 
@@ -104,8 +138,27 @@ def json_load(path):
         return json.load(fh)
 
 
+def guard_write(path):
+    """Run before overwriting a file in an editor request: refuse if it
+    changed after the submitting form was rendered, then snapshot the current
+    contents into the project's history (undo). Outside a request (tests,
+    scripts) both checks are skipped."""
+    com = common()
+    full = os.path.abspath(path)
+    com.check_stale(full, getattr(_req, "rendered", None),
+                    getattr(_req, "written", ()))
+    proj = getattr(_req, "project", None)
+    hist = com.history_dir(proj.root) if proj else None
+    if hist:
+        com.snapshot(full, hist)
+    written = getattr(_req, "written", None)
+    if written is not None:
+        written.add(full)
+
+
 def json_save(path, data):
     """Write GFF-as-JSON, with one-time .bak backup and atomic replace."""
+    guard_write(path)
     bak = path + ".bak"
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -253,8 +306,13 @@ def _nav():
         links.append("<a href='%s'>Areas</a>" % purl("/areas"))
         if proj and proj.creature_count():
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+        if proj and proj.has_palettes():
+            links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
         if proj and proj.has_module():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+        links.append("<a href='%s'>Find</a>" % purl("/xref"))
+        if proj and proj.history_dir():
+            links.append("<a href='%s'>History</a>" % purl("/history"))
         links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
     else:
         links.append("<a href='%s'>Dashboard</a>" % gurl("/"))
@@ -262,7 +320,10 @@ def _nav():
             links.append("<a href='%s'>%s</a>" % (purl("/"), esc(_slug())))
             links.append("<a href='%s'>Areas</a>" % purl("/areas"))
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
+            links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+            links.append("<a href='%s'>Find</a>" % purl("/xref"))
+            links.append("<a href='%s'>History</a>" % purl("/history"))
             links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
             if _has_wiki_current():
                 links.append("<a href='%s'>Wiki</a>" % purl("/wiki/"))
@@ -388,6 +449,13 @@ class Project:
         if not self.has_unpacked():
             return 0
         return len(glob.glob(os.path.join(self.unpacked, "*.utc.json")))
+
+    def history_dir(self):
+        return common().history_dir(self.root)
+
+    def has_palettes(self):
+        return self.has_unpacked() and bool(
+            glob.glob(os.path.join(self.unpacked, "*palcus.itp.json")))
 
     def has_module(self):
         return os.path.isfile(os.path.join(self.unpacked, "module.ifo.json"))
@@ -1002,9 +1070,11 @@ def render_tags_form(root, resrefs):
             "Tag leaves that field unchanged. Area type sets the .are Flags "
             "bits the area list filters on.</p>"
             "<p class='warn'>ResRef rename moves the .are.json/.git.json/"
-            ".gic.json files on disk and rewrites the ResRef field, but does "
-            "NOT update door/trigger transitions in other areas that target "
-            "the old resref - search those separately.</p>"
+            ".gic.json files on disk, rewrites the ResRef field, and updates "
+            "module.ifo's Mod_Entry_Area / Mod_Area_list. Door and trigger "
+            "transitions target waypoint/door tags, not areas, so they are "
+            "unaffected. Scripts that quote the old tag or resref are listed "
+            "after the change but not edited.</p>"
             "<input type='submit' value='Apply'> "
             "<a class='cancel-link' href='%s'>Cancel</a></form>" %
             (purl("/areas/tags/preview"), hidden_resrefs(resrefs), "".join(rows),
@@ -1012,8 +1082,357 @@ def render_tags_form(root, resrefs):
     return page("Edit area names / tags / resrefs", body)
 
 
+# --- Reference-aware rename helpers ------------------------------------------
+# Renaming an area's ResRef/Tag touches only two kinds of references:
+#  - module.ifo (GFF data): Mod_Entry_Area and Mod_Area_list[].Area_Name hold
+#    area RESREFs, so those are rewritten along with the rename.
+#  - NWScript source: a script can name the old tag/resref in a string
+#    literal. That can't be rewritten safely, so it is only reported.
+# door/trigger LinkedTo targets waypoint/door tags, never an area, so a rename
+# never invalidates one.
+
+SCRIPT_SCAN_CAP = 15   # matches shown per old value; the rest are counted
+
+
+def module_ifo_rewrites(root, renames):
+    """[(label, old, new)] module.ifo fields that name a renamed area (by
+    resref), given {old_resref: new_resref}. Read-only; [] when the project
+    has no module.ifo.json."""
+    path = module_ifo_path(root)
+    if not renames or not os.path.isfile(path):
+        return []
+    d = json_load(path)
+    out = []
+    entry = getv(d, "Mod_Entry_Area", "")
+    if str(entry).lower() in renames:
+        out.append(("module.ifo: Mod_Entry_Area", entry,
+                    renames[str(entry).lower()]))
+    for i, item in enumerate(getv(d, "Mod_Area_list", []) or []):
+        name = getv(item, "Area_Name", "")
+        if str(name).lower() in renames:
+            out.append(("module.ifo: Mod_Area_list[%d]" % i, name,
+                        renames[str(name).lower()]))
+    return out
+
+
+def apply_module_rewrites(root, renames):
+    """Rewrite the fields module_ifo_rewrites() reports. Returns the number
+    of fields changed."""
+    path = module_ifo_path(root)
+    d = json_load(path)
+    n = 0
+    entry = str(getv(d, "Mod_Entry_Area", "")).lower()
+    if entry in renames:
+        setv(d, "Mod_Entry_Area", renames[entry], "resref")
+        n += 1
+    for item in getv(d, "Mod_Area_list", []) or []:
+        name = str(getv(item, "Area_Name", "")).lower()
+        if name in renames:
+            setv(item, "Area_Name", renames[name], "resref")
+            n += 1
+    if n:
+        json_save(path, d)
+        invalidate(path)
+    return n
+
+
+def scan_script_references(root, needles):
+    """Quoted-string occurrences of each needle in the project's .nss files.
+    Returns {needle: [(relpath, lineno, line)]}. Source only (no .ncs), and
+    a literal match isn't proof of a real reference - it's a net, not a
+    guarantee."""
+    needles = [n for n in dict.fromkeys(needles) if n]
+    hits = {n: [] for n in needles}
+    if not needles:
+        return hits
+    quoted = {n: '"%s"' % n.lower() for n in needles}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for fn in sorted(files):
+            if not fn.lower().endswith(".nss"):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, encoding="cp1252", errors="replace") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            for lineno, line in enumerate(lines, 1):
+                low = line.lower()
+                for n, q in quoted.items():
+                    if q in low:
+                        hits[n].append((rel, lineno, line.strip()[:120]))
+    return hits
+
+
+def pending_rename_needles(root, form):
+    """Old tag / old resref values a submitted tags form would replace -
+    read-only, so it can run before apply_tags mutates anything."""
+    needles = []
+    for res in form.get("res", []):
+        try:
+            d = load_cached(are_path(root, res))
+        except (OSError, ValueError):
+            continue
+        new_tag = form.get("tag_" + res, [""])[0].strip()
+        old_tag = getv(d, "Tag") or ""
+        if new_tag and new_tag != old_tag:
+            needles.append(old_tag)
+        new_ref = form.get("ref_" + res, [""])[0].strip().lower()
+        if new_ref and new_ref != res and re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
+            needles.append(res)
+    return needles
+
+
+def render_script_scan(hits):
+    """HTML report for scan_script_references() results ('' if nothing to
+    report on); notes that it's detect-only."""
+    if not hits:
+        return ""
+    found = {n: h for n, h in hits.items() if h}
+    if not found:
+        return ("<p class='note'>No script in this project quotes the old "
+                "tag/resref (<code>.nss</code> source only - compiled-only "
+                "scripts aren't checked).</p>")
+    parts = []
+    for needle, rows in found.items():
+        shown = rows[:SCRIPT_SCAN_CAP]
+        items = "".join("<li><code>%s:%d</code> %s</li>" %
+                        (esc(f), ln, esc(text)) for f, ln, text in shown)
+        more = ("<li class='note'>+%d more</li>" % (len(rows) - len(shown))
+                if len(rows) > len(shown) else "")
+        parts.append("<p>Scripts quoting <code>\"%s\"</code> (%d):</p><ul>%s%s</ul>"
+                     % (esc(needle), len(rows), items, more))
+    return ("<div class='warn'><b>Scripts still use the old value.</b> These "
+            "are not changed automatically - check whether each is really a "
+            "reference to the renamed area (e.g. a tag lookup) and update it."
+            "</div>%s" % "".join(parts))
+
+
+EMBED_MIN_LEN = 3        # shorter needles would match too much to be useful
+EMBED_SCAN_CAP = 15
+
+
+def scan_embedded_tags(git_root, needles):
+    """Placed objects whose Tag contains an old area tag/resref as a whole
+    word (so 'town' matches 'TOWN_VAULT' but not 'downtown'). Returns
+    {needle: [(area resref, category, tag)]}. Report-only: a tag that merely
+    resembles an area's is not proof it is meant to track it."""
+    needles = [n for n in dict.fromkeys(needles) if len(n) >= EMBED_MIN_LEN]
+    hits = {n: [] for n in needles}
+    if not needles:
+        return hits
+    pats = {n: re.compile(r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9])" % re.escape(n),
+                          re.I) for n in needles}
+    for gp in sorted(glob.glob(os.path.join(git_root, "*.git.json"))):
+        try:
+            g = load_cached(gp)
+        except (OSError, ValueError):
+            continue
+        area = os.path.basename(gp)[:-len(".git.json")]
+        for category, field in OBJECT_LIST_FIELDS.items():
+            for entry in getv(g, field, []) or []:
+                tag = getv(entry, "Tag", "")
+                if not tag:
+                    continue
+                for n, pat in pats.items():
+                    if pat.search(tag):
+                        hits[n].append((area, category, tag))
+    return hits
+
+
+def render_embedded_tags(hits):
+    found = {n: h for n, h in hits.items() if h}
+    if not found:
+        return ""
+    parts = []
+    for needle, rows in found.items():
+        shown = rows[:EMBED_SCAN_CAP]
+        items = "".join("<li><code>%s</code> %s tag <code>%s</code></li>"
+                        % (esc(a), esc(c), esc(t)) for a, c, t in shown)
+        more = ("<li class='note'>+%d more</li>" % (len(rows) - len(shown))
+                if len(rows) > len(shown) else "")
+        parts.append("<p>Object tags containing <code>%s</code> (%d):</p>"
+                     "<ul>%s%s</ul>" % (esc(needle), len(rows), items, more))
+    return ("<div class='warn'><b>Some placed objects have tags that embed the "
+            "old value.</b> Not changed automatically - if a script builds "
+            "these tags from the area's tag or resref, they need renaming "
+            "too.</div>%s" % "".join(parts))
+
+
+def render_rename_scans(root, git_root, form):
+    """Both read-only reports for a submitted tags form: scripts quoting the
+    old value, and placed objects whose tags embed it."""
+    needles = pending_rename_needles(root, form)
+    return (render_script_scan(scan_script_references(root, needles))
+            + render_embedded_tags(scan_embedded_tags(git_root, needles)))
+
+
+# --- Cross-reference ("where is this used?") ---------------------------------
+
+XREF_MIN_LEN = 2
+XREF_FILE_CAP = 300      # files listed before the rest are only counted
+XREF_HITS_PER_FILE = 6
+XREF_KINDS = {
+    "are": "Areas", "git": "Placed objects (area .git)", "gic": "Area .gic",
+    "dlg": "Dialogs", "utc": "Creature blueprints", "uti": "Item blueprints",
+    "utp": "Placeable blueprints", "utd": "Door blueprints",
+    "utt": "Trigger blueprints", "utm": "Store blueprints",
+    "ute": "Encounter blueprints", "uts": "Sound blueprints",
+    "utw": "Waypoint blueprints", "itp": "Palettes", "ifo": "Module",
+    "jrl": "Journal", "fac": "Factions", "bic": "Characters",
+}
+
+
+def _xref_walk(node, path, needle, out):
+    """Append (field path, value) for every string equal to `needle`
+    (case-insensitive) inside a GFF-as-JSON node."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "type" or k.startswith("__"):
+                continue
+            _xref_walk(v, path if k == "value" else (path + "." + k if path else k),
+                       needle, out)
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            _xref_walk(v, "%s[%d]" % (path, i), needle, out)
+    elif isinstance(node, str) and node.lower() == needle:
+        out.append((path, node))
+
+
+def find_references(roots, needle):
+    """Everywhere `needle` (a tag, resref or script/variable name) appears:
+    {"defined": [files named for it], "files": [(relpath, kind, [(path,
+    value)])], "scripts": [(relpath, lineno, line)]}. Exact, case-insensitive
+    string matches only - a net, not proof of a real reference. A cheap
+    raw-text check skips files that can't match before any JSON is parsed."""
+    needle = needle.strip().lower()
+    result = {"defined": [], "files": [], "scripts": []}
+    if len(needle) < XREF_MIN_LEN:
+        return result
+    seen = set()
+    for root in roots:
+        root = os.path.abspath(root)
+        if root in seen:
+            continue
+        seen.add(root)
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+            for fn in sorted(files):
+                low = fn.lower()
+                full = os.path.join(dirpath, fn)
+                rel = os.path.relpath(full, root)
+                if low.split(".", 1)[0] == needle:
+                    result["defined"].append(rel)
+                if not low.endswith(".json"):
+                    continue
+                try:
+                    with open(full, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                    if needle not in text.lower():
+                        continue
+                    hits = []
+                    _xref_walk(json.loads(text), "", needle, hits)
+                except (OSError, ValueError):
+                    continue
+                if hits:
+                    kind = low.rsplit(".", 2)[-2] if low.count(".") >= 2 else "?"
+                    result["files"].append((rel, kind, hits))
+        for n, rows in scan_script_references(root, [needle]).items():
+            result["scripts"].extend(rows)
+    return result
+
+
+def render_xref(proj, query_text=""):
+    q = query_text.strip()
+    form = ("<form method='get' action='%s'><input name='q' value='%s' "
+            "size='32' placeholder='tag, resref, script or variable name'> "
+            "<button>Find references</button></form>" % (purl("/xref"), esc(q)))
+    if not q:
+        return page("Cross-reference", form + "<p class='note'>Finds every "
+                    "place a tag, blueprint resref, script or variable name "
+                    "appears: area and object fields, dialogs, blueprints, "
+                    "palettes, module.ifo, and quoted in <code>.nss</code> "
+                    "source. Exact, case-insensitive matches.</p>")
+    if len(q) < XREF_MIN_LEN:
+        return page("Cross-reference", form + "<p class='err'>Enter at least "
+                    "%d characters.</p>" % XREF_MIN_LEN)
+    roots = [proj.unpacked, proj.git_root, proj.gic_root]
+    if os.path.isdir(os.path.join(proj.root, "src")):
+        roots.append(os.path.join(proj.root, "src"))
+    roots = [r for r in roots if os.path.isdir(r)]
+    res = find_references(roots, q)
+    embed = scan_embedded_tags(proj.git_root, [q]).get(q, [])
+    total = sum(len(h) for _, _, h in res["files"]) + len(res["scripts"])
+    parts = [form, "<p><b>%d</b> reference%s to <code>%s</code> in %d file%s."
+             "</p>" % (total, "" if total == 1 else "s", esc(q),
+                       len(res["files"]) + len({r[0] for r in res["scripts"]}),
+                       ""if len(res["files"]) + len({r[0] for r in res["scripts"]}) == 1 else "s")]
+    if res["defined"]:
+        parts.append("<h3>Defined by</h3><ul>%s</ul>" % "".join(
+            "<li><code>%s</code></li>" % esc(f) for f in res["defined"]))
+    groups = {}
+    for rel, kind, hits in res["files"]:
+        groups.setdefault(kind, []).append((rel, hits))
+    shown = 0
+    for kind in sorted(groups, key=lambda k: (XREF_KINDS.get(k, "~" + k))):
+        items = []
+        for rel, hits in groups[kind]:
+            if shown >= XREF_FILE_CAP:
+                break
+            shown += 1
+            stem = os.path.basename(rel).split(".", 1)[0]
+            link = ""
+            if kind in ("are", "git"):
+                link = (" <a href='%s'>edit area</a>" %
+                        purl("/areas/edit?res=%s&action=tags" % urllib.parse.quote(stem)))
+            elif kind == "utc":
+                link = (" <a href='%s'>edit</a>" %
+                        purl("/creature?res=%s" % urllib.parse.quote(stem)))
+            fields = "".join("<li><code>%s</code> = %s</li>" % (esc(pth), esc(v))
+                             for pth, v in hits[:XREF_HITS_PER_FILE])
+            more = ("<li class='note'>+%d more</li>" % (len(hits) - XREF_HITS_PER_FILE)
+                    if len(hits) > XREF_HITS_PER_FILE else "")
+            items.append("<li><code>%s</code>%s<ul>%s%s</ul></li>"
+                         % (esc(rel), link, fields, more))
+        n = sum(len(h) for _, h in groups[kind])
+        parts.append("<h3>%s <span class='note'>(%d)</span></h3><ul>%s</ul>"
+                     % (esc(XREF_KINDS.get(kind, "." + kind)), n, "".join(items)))
+    if shown >= XREF_FILE_CAP and len(res["files"]) > shown:
+        parts.append("<p class='note'>Listing capped at %d files; %d more not "
+                     "shown.</p>" % (XREF_FILE_CAP, len(res["files"]) - shown))
+    if res["scripts"]:
+        rows = res["scripts"][:XREF_FILE_CAP]
+        parts.append("<h3>Scripts quoting it <span class='note'>(%d)</span></h3>"
+                     "<ul>%s</ul>" % (len(res["scripts"]), "".join(
+                         "<li><code>%s:%d</code> %s</li>" % (esc(f), ln, esc(t))
+                         for f, ln, t in rows)))
+        if len(res["scripts"]) > len(rows):
+            parts.append("<p class='note'>+%d more</p>" % (len(res["scripts"]) - len(rows)))
+    if embed:
+        parts.append("<h3>Object tags containing it as a word "
+                     "<span class='note'>(%d)</span></h3><ul>%s</ul>" % (
+                         len(embed), "".join(
+                             "<li><code>%s</code> %s tag <code>%s</code></li>"
+                             % (esc(a), esc(c), esc(t))
+                             for a, c, t in embed[:EMBED_SCAN_CAP])))
+    if not total and not res["defined"] and not embed:
+        parts.append("<p class='note'>Nothing found. Compiled-only scripts "
+                     "(<code>.ncs</code>) and values built at runtime from "
+                     "string pieces can't be seen.</p>")
+    else:
+        parts.append("<p class='note'>Exact, case-insensitive string matches; "
+                     "scripts are <code>.nss</code> source only.</p>")
+    return page("Cross-reference: " + q, "".join(parts))
+
+
 def apply_tags(root, git_root, gic_root, form, dry_run=False):
     resrefs, changed, errors, diffs = form.get("res", []), [], [], []
+    renames = {}  # old resref -> new resref, for the module.ifo cascade
+    # Read before any file is touched: after the rename the old tag/resref
+    # is no longer on disk to look up.
+    scan_html = "" if dry_run else render_rename_scans(root, git_root, form)
     for res in resrefs:
         path = are_path(root, res)
         d = json_load(path)
@@ -1057,13 +1476,15 @@ def apply_tags(root, git_root, gic_root, form, dry_run=False):
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
                 errors.append("%s: invalid resref %r" % (res, new_ref))
                 new_ref = ""
-            elif os.path.exists(are_path(root, new_ref)):
+            elif (os.path.exists(are_path(root, new_ref))
+                  or new_ref in renames.values()):
                 errors.append("%s: %r already exists" % (res, new_ref))
                 new_ref = ""
         else:
             new_ref = ""
         if new_ref:
             touched = True
+            renames[res.lower()] = new_ref
             if dry_run:
                 diffs.append((res, "ResRef (renames .are/.git/.gic.json)",
                              res, new_ref))
@@ -1081,9 +1502,24 @@ def apply_tags(root, git_root, gic_root, form, dry_run=False):
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(base, new_ref + ext))
                     invalidate(old_p)
+    # module.ifo cascade. Runs after the per-area writes so a failure here
+    # can't leave module.ifo naming a resref that was never renamed; and it
+    # only warns, since the area rename itself has already succeeded.
+    try:
+        rewrites = module_ifo_rewrites(root, renames)
+        if dry_run:
+            by_new = {v: k for k, v in renames.items()}
+            diffs.extend((by_new.get(new, old), label, old, new)
+                         for label, old, new in rewrites)
+        elif rewrites:
+            apply_module_rewrites(root, renames)
+    except (OSError, ValueError) as e:
+        errors.append("module.ifo could not be updated (%s) - set "
+                      "Mod_Entry_Area / Mod_Area_list to the new resref by "
+                      "hand" % e)
     if dry_run:
         return diffs, errors
-    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
+    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors) + scan_html
     return result_page("Names / tags updated", changed, resrefs, extra)
 
 
@@ -1096,7 +1532,8 @@ def result_page(title, changed, selected, extra=""):
     return page(title, body)
 
 
-def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None,
+                        extra_html=""):
     """Old -> new confirmation step shared by every bulk area editor. `form`
     is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
     what was submitted here - the real apply_* runs are unchanged; this
@@ -1121,11 +1558,11 @@ def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
         "area(s):</p>"
         "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
         "<th>New</th></tr>%s</table>"
-        "<form method='post' action='%s'>%s"
+        "%s<form method='post' action='%s'>%s"
         "<input type='submit' value='Confirm &amp; Apply'></form>"
         "<p><a href='%s'>Cancel - back to areas</a></p>" %
         (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
-         rows, apply_action, hidden, purl("/areas")))
+         rows, extra_html, apply_action, hidden, purl("/areas")))
     return page(title + " - preview", body)
 
 
@@ -2871,6 +3308,320 @@ def apply_module(root, form):
     return touched
 
 
+# --- Palettes (*palcus.itp) -------------------------------------------------
+# The editing logic lives in the sibling bin/nwn-palette (shared with its CLI);
+# this section is only the HTML front end. Loaded by path, like the other
+# bin/ scripts, so it also works from the frozen nwn-pytools bundle.
+
+_PALETTE_LIB = None
+
+
+def palette_lib():
+    global _PALETTE_LIB
+    if _PALETTE_LIB is None:
+        _PALETTE_LIB = _load_sibling("nwn-palette")
+    return _PALETTE_LIB
+
+
+DIALOG_TLK = None   # --dialog-tlk override; else each project's tlk/dialog.tlk
+_RESOLVERS = {}     # project root -> strref resolver (or None)
+
+
+def _project_resolver():
+    proj = getattr(_req, "project", None)
+    if proj is None:
+        return None
+    key = proj.root
+    if key not in _RESOLVERS:
+        try:
+            _RESOLVERS[key] = palette_lib().make_resolver(
+                proj.root, proj.unpacked, DIALOG_TLK)
+        except (OSError, ValueError):
+            _RESOLVERS[key] = None
+    return _RESOLVERS[key]
+
+
+def _strref_text(ref):
+    """Text for a palette STRREF: the --custom-tlk for module strrefs, else
+    the project's dialog.tlk / custom .tlk copies (empty if neither exists)."""
+    if ref >= CUSTOM_TLK_OFFSET and CUSTOM_TLK:
+        txt = CUSTOM_TLK.get(ref - CUSTOM_TLK_OFFSET, "")
+        if txt:
+            return txt
+    resolve = _project_resolver()
+    return resolve(ref) if resolve else ""
+
+
+def render_palettes(root):
+    pl = palette_lib()
+    rows = []
+    for key in pl.available(root):
+        doc = pl.load(root, key)
+        folders, leaves = pl._stats(doc)
+        issues = pl.validate(doc)
+        missing = len(pl.unlisted(root, key, doc))
+        rows.append(
+            "<tr><td><a href='%s'>%s</a></td><td>%s</td><td>%d</td><td>%d</td>"
+            "<td>%s</td><td>%s</td></tr>" %
+            (purl("/palette?p=" + key), esc(key.title()),
+             esc(pl.PALETTES[key][0] + ".itp"), folders, leaves,
+             ("<span class='warn'>%d</span>" % missing) if missing else "0",
+             ("<span class='err'>%d</span>" % len(issues)) if issues else "0"))
+    if not rows:
+        return page("Palettes", "<p class='err'>No *palcus.itp.json files in "
+                    "this project.</p>")
+    return page("Palettes",
+                "<table><tr><th>Palette</th><th>File</th><th>Folders</th>"
+                "<th>Blueprints</th><th>Unlisted in project</th>"
+                "<th>Issues</th></tr>%s</table>"
+                "<p class='note'>Unlisted = blueprints in this project that no "
+                "palette entry points at (so the toolset's palette doesn't show "
+                "them). Blueprints with PaletteID 255 are never counted.</p>"
+                % "".join(rows))
+
+
+def _folder_options(doc, pl, selected="", top_label=None):
+    opts = []
+    if top_label:
+        opts.append("<option value=''>%s</option>" % esc(top_label))
+    for path, node, depth in pl.walk(pl.top(doc)):
+        if pl.is_leaf(node):
+            continue
+        ps = pl.path_str(path)
+        opts.append("<option value='%s'%s>%s%s</option>" % (
+            ps, " selected" if ps == selected else "",
+            "&nbsp;&nbsp;" * depth,
+            esc(pl.node_name(node, _strref_text))))
+    return "".join(opts)
+
+
+_PALETTE_JS = """
+<script>
+function palFilter(){
+  var q = document.getElementById('palq').value.toLowerCase();
+  document.querySelectorAll('tr.pal-row').forEach(function(r){
+    r.style.display = (!q || r.textContent.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+  });
+}
+function palNeed(n, msg){
+  var c = document.querySelectorAll('input[name=sel]:checked').length;
+  if (c < n) { alert(msg); return false; }
+  return true;
+}
+</script>
+"""
+
+
+def render_palette(root, key, msg=""):
+    pl = palette_lib()
+    if key not in pl.PALETTES:
+        return page("Unknown palette", "<p class='err'>No such palette.</p>"
+                    "<p><a href='%s'>Palettes</a></p>" % purl("/palettes"))
+    doc = pl.load(root, key)
+    rows = []
+    for path, node, depth in pl.walk(pl.top(doc)):
+        ps = pl.path_str(path)
+        leaf = pl.is_leaf(node)
+        name = pl.node_name(node, _strref_text)
+        detail = esc(pl._val(node, "RESREF", "")) if leaf else (
+            "<span class='note'>%d item(s)</span>" % len(pl.children(node)))
+        if leaf and key == "creature":
+            detail += " <span class='note'>CR %s, %s</span>" % (
+                esc(pl._val(node, "CR", "?")), esc(pl._val(node, "FACTION", "?")))
+        rows.append(
+            "<tr class='pal-row'><td><input type='checkbox' name='sel' "
+            "value='%s'></td><td style='padding-left:%.1fem'>%s %s</td>"
+            "<td>%s</td><td>%s</td></tr>" %
+            (ps, .6 + depth * 1.4, "&#9679;" if leaf else "&#128193;",
+             esc(name), detail, esc(pl._val(node, "ID", ""))))
+    issues = pl.validate(doc)
+    issue_html = ("<p class='warn'>%d structural issue(s): %s</p>" % (
+        len(issues), esc("; ".join(issues[:5])))) if issues else ""
+    msg_html = "<p class='ok'>%s</p>" % esc(msg) if msg else ""
+    missing = pl.unlisted(root, key, doc)
+
+    need1 = "return palNeed(1,'Select at least one row first.')"
+    toolbar = (
+        "<div class='sticky-toolbar'>"
+        "<input type='search' id='palq' placeholder='filter...' oninput='palFilter()'> "
+        "<span class='selected-actions'>"
+        "<button name='op' value='up' onclick=\"%(n)s\">Move up</button>"
+        "<button name='op' value='down' onclick=\"%(n)s\">Move down</button>"
+        "<button name='op' value='delete' onclick=\"return palNeed(1,'Select "
+        "at least one row first.') && confirm('Delete the selected rows and "
+        "everything inside them?')\">Delete</button></span><br>"
+        "<span class='selected-actions'>Rename selected to "
+        "<input type='text' name='name' size='24'> "
+        "<button name='op' value='rename' onclick=\"%(n)s\">Rename</button>"
+        "<button name='op' value='mkdir'>New folder inside selected "
+        "(or top level)</button></span><br>"
+        "<span class='selected-actions'>Move selected into "
+        "<select name='target'>%(opts)s</select> "
+        "<button name='op' value='move' onclick=\"%(n)s\">Move</button></span><br>"
+        "<span class='selected-actions'>Add blueprint resref "
+        "<input type='text' name='resref' size='18' maxlength='16'> "
+        "<button name='op' value='add' onclick=\"%(n)s\">Add to selected "
+        "folder</button></span></div>" %
+        {"n": need1, "opts": _folder_options(doc, pl, top_label="(top level)")})
+    main_form = (
+        "<form method='post' action='%s'><input type='hidden' name='p' "
+        "value='%s'>%s<table><tr><th></th><th>Name</th><th>Blueprint</th>"
+        "<th>ID</th></tr>%s</table></form>" %
+        (purl("/palette/apply"), esc(key), toolbar, "".join(rows)))
+
+    sync_html = ""
+    if missing:
+        pick = "".join(
+            "<tr><td><input type='checkbox' name='pick' value='%s' checked>"
+            "</td><td>%s</td><td>%s</td></tr>" % (esc(r), esc(r), esc(n))
+            for r, n in missing)
+        sync_html = (
+            "<h2>Blueprints missing from this palette (%d)</h2>"
+            "<form method='post' action='%s'><input type='hidden' name='p' "
+            "value='%s'><input type='hidden' name='op' value='sync'>"
+            "<table><tr><th></th><th>Resref</th><th>Name</th></tr>%s</table>"
+            "File into <select name='target'>%s</select> "
+            "<input type='submit' value='Add checked'></form>" %
+            (len(missing), purl("/palette/apply"), esc(key), pick,
+             _folder_options(doc, pl, top_label="Custom (top level, "
+                             "created if absent)")))
+    note = ("<p class='note'>Stock names come from the project's "
+            "tlk/dialog.tlk; a (strref N) name means that file isn't there "
+            "(re-run unpack, or start the console with --dialog-tlk). "
+            "Renaming a stock entry replaces it with a custom NAME. Folder IDs must stay "
+            "unique within a palette (the toolset keys on them); new folders "
+            "get the next free ID. First edit writes a .json.bak.</p>")
+    return page("Palette: %s" % key.title(),
+                "<p><a href='%s'>&larr; Palettes</a></p>%s%s%s%s%s%s" %
+                (purl("/palettes"), msg_html, issue_html, main_form,
+                 sync_html, note, _PALETTE_JS))
+
+
+def apply_palette(root, form):
+    """Run one palette edit. Returns a status message; raises PaletteError."""
+    pl = palette_lib()
+    # So status messages name stock entries by text, not "(strref N)". Set
+    # per request; a local single-user tool, so concurrent projects racing
+    # on this is not a real case.
+    pl.STRREF_RESOLVER = _project_resolver()
+    key = form.get("p", [""])[0]
+    op = form.get("op", [""])[0]
+    if key not in pl.PALETTES:
+        raise pl.PaletteError("unknown palette")
+    doc = pl.load(root, key)
+    before = set(pl.validate(doc))
+    # Resolve every selected row to its node first - paths shift as soon as
+    # the first edit lands.
+    nodes = [pl.node_at(doc, pl.parse_path(p)) for p in form.get("sel", [])]
+    name = form.get("name", [""])[0]
+    target_s = form.get("target", [""])[0]
+    target = pl.node_at(doc, pl.parse_path(target_s)) if target_s else None
+
+    def one():
+        if len(nodes) != 1:
+            raise pl.PaletteError("select exactly one row")
+        return nodes[0]
+
+    def parent_folder():
+        if not nodes:
+            return None
+        return one()
+
+    if op == "rename":
+        msg = pl.rename(doc, one(), name)
+    elif op == "mkdir":
+        msg = pl.add_folder(doc, parent_folder(), name)
+    elif op == "delete":
+        msg = pl.delete(doc, nodes)
+    elif op in ("up", "down"):
+        msg = pl.move_by(doc, one(), -1 if op == "up" else 1)
+    elif op == "move":
+        msg = pl.move_into(doc, nodes, target)
+    elif op == "add":
+        msg = pl.add_blueprint(doc, key, root, one(),
+                               form.get("resref", [""])[0])
+    elif op == "sync":
+        picks = {r.lower() for r in form.get("pick", [])}
+        todo = [(r, n) for r, n in pl.unlisted(root, key, doc) if r in picks]
+        if not todo:
+            raise pl.PaletteError("nothing checked")
+        folder = target or pl.custom_folder(doc)
+        if folder is None:
+            pl.add_folder(doc, None, pl.CUSTOM_FOLDER)
+            folder = pl.top(doc)[-1]
+        for resref, nm in todo:
+            pl.add_blueprint(doc, key, root, folder, resref, nm)
+        msg = "added %d blueprint(s) to %r" % (
+            len(todo), pl.node_name(folder, _strref_text))
+    else:
+        raise pl.PaletteError("unknown action %r" % op)
+
+    introduced = [i for i in pl.validate(doc) if i not in before]
+    if introduced:
+        raise pl.PaletteError("edit would leave the palette invalid: "
+                              + "; ".join(introduced))
+    guard_write(pl.palette_path(root, key))
+    pl.save(root, key, doc)
+    return msg
+
+
+# --- Edit history (undo) ------------------------------------------------------
+
+def render_history(proj, msg=""):
+    com = common()
+    hist = proj.history_dir()
+    if not hist:
+        return page("Edit history",
+                    "<p class='note'>History is kept for nwn-manager projects "
+                    "(a folder with a nasher.cfg); this directory isn't one, "
+                    "so only the one-time <code>.bak</code> copies exist.</p>")
+    entries = com.list_history(hist)[:200]
+    rows = "".join(
+        "<tr><td>%s</td><td>%s</td><td>%d KB</td><td>%s</td><td>"
+        "<form method='post' action='%s'><input type='hidden' name='key' "
+        "value='%s'><input type='hidden' name='stamp' value='%s'>"
+        "<button onclick=\"return confirm('Restore this version? The current "
+        "file is saved to history first.')\">Restore</button></form></td></tr>"
+        % (esc(e["name"]), esc(e["stamp"].replace("T", " ")),
+           max(1, e["size"] // 1024),
+           "" if e["exists"] else "<span class='warn'>file no longer at this "
+           "path (renamed?) - restore recreates it</span>",
+           purl("/history/restore"), esc(e["key"]), esc(e["stamp"]))
+        for e in entries)
+    table = ("<table><tr><th>File</th><th>Saved (UTC, before the edit)</th>"
+             "<th>Size</th><th></th><th></th></tr>%s</table>" % rows
+             if rows else "<p class='note'>No edits recorded yet.</p>")
+    return page("Edit history",
+                "%s<p class='note'>Every edit made through the console or "
+                "<code>nwn-manager palette</code> first copies the file's "
+                "previous contents here (last %d versions per file, newest "
+                "200 shown). Stored under <code>.nwn-manager/history</code>, "
+                "which is gitignored.</p>%s" %
+                ("<p class='ok'>%s</p>" % esc(msg) if msg else "",
+                 com.KEEP_PER_FILE, table))
+
+
+def apply_history_restore(proj, form):
+    com = common()
+    hist = proj.history_dir()
+    if not hist:
+        raise ValueError("no history for this directory")
+    key = form.get("key", [""])[0]
+    stamp = form.get("stamp", [""])[0]
+    # Same stale/history guards as an edit: the restore must not clobber a
+    # file changed since the history page was rendered.
+    folder = os.path.join(hist, key)
+    try:
+        with open(os.path.join(folder, "path.txt"), encoding="utf-8") as fh:
+            orig = fh.read().strip()
+    except OSError:
+        raise ValueError("unknown history entry")
+    guard_write(orig)
+    target = com.restore(hist, key, stamp)
+    invalidate(target)
+    return "restored %s" % os.path.basename(target)
+
+
 # --- Dashboard / project home / jobs pages ----------------------------------
 
 def upload_form_html():
@@ -3012,9 +3763,11 @@ def render_project_home(proj):
                 "scripts, lighting/fog, tags/resrefs.</p>"
                 "<p><a href='%s'>Creatures</a> - %d blueprints - stats, "
                 "feats, appearance.</p>"
+                "<p><a href='%s'>Palettes</a> - toolset palette folders and "
+                "blueprint entries (*palcus.itp).</p>"
                 "<p><a href='%s'>Module info</a> - name &amp; description.</p></div>"
                 % (purl("/areas"), n, purl("/creatures"), proj.creature_count(),
-                   purl("/module")))
+                   purl("/palettes"), purl("/module")))
 
     ingest = ("<form method='post' action='%s'>"
               "<button type='submit'>Re-ingest from source .mod</button></form>"
@@ -3091,12 +3844,20 @@ class Handler(BaseHTTPRequestHandler):
             return path[len(self.url_prefix):] or "/"
         return path
 
-    def _send(self, content, code=200):
+    def _send(self, content, code=200, inject=True):
+        # Every POST form on a page gets the CSRF token + render time. The
+        # start page is excluded: it builds forms in JS strings and is also
+        # served from file:// where it has no session (its routes are exempt).
+        sid = getattr(_req, "sid", "")
+        if inject and sid:
+            content = csrf_guard().inject(content, sid)
         data = content.encode()
         try:
             self.send_response(code)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            if getattr(_req, "new_sid", False):
+                self.send_header("Set-Cookie", common().CsrfGuard.cookie_header(sid))
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -3139,9 +3900,40 @@ class Handler(BaseHTTPRequestHandler):
             self._client_gone()
 
     def _form(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return urllib.parse.parse_qs(self.rfile.read(length).decode(),
-                                     keep_blank_values=True)
+        # Memoised: the body can only be read once, and do_POST reads it for
+        # CSRF verification before the route handlers ask for it again.
+        if getattr(self, "_form_cache", None) is None:
+            length = int(self.headers.get("Content-Length", 0))
+            self._form_cache = urllib.parse.parse_qs(
+                self.rfile.read(length).decode(), keep_blank_values=True)
+        return self._form_cache
+
+    def _begin(self):
+        """Reset per-request context; pick up or mint the session id."""
+        _req.proxy = self.url_prefix
+        _req.slug = None
+        _req.project = None
+        _req.rendered = None
+        _req.written = set()
+        com = common()
+        sid = com.CsrfGuard.sid_from_cookie(self.headers.get("Cookie"))
+        _req.new_sid = not sid
+        _req.sid = sid or csrf_guard().new_sid()
+        self._form_cache = None
+
+    # Routes the standalone start.html (opened from file://, so no session)
+    # posts to. They create projects or stop the console; none edits module
+    # data, which is what the token protects.
+    CSRF_EXEMPT = ("/shutdown", "/projects/new", "/projects/ingest-root")
+
+    def _csrf_ok(self, path):
+        if path in self.CSRF_EXEMPT:
+            return True
+        form = self._form()
+        sid = common().CsrfGuard.sid_from_cookie(self.headers.get("Cookie"))
+        tokens = form.get(common().FIELD_CSRF, [])
+        _req.rendered = common().rendered_from_form(form)
+        return any(csrf_guard().verify(sid, t) for t in tokens)
 
     def log_message(self, fmt, *args):  # quieter default log
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -3155,9 +3947,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET ----------------------------------------------------------------
     def do_GET(self):
-        _req.proxy = self.url_prefix
-        _req.slug = None
-        _req.project = None
+        self._begin()
         raw = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(raw.query)
         path = self._strip_proxy(raw.path)
@@ -3169,7 +3959,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/":
                 self._send(render_dashboard())
             elif path == "/start":
-                self._send(render_start())
+                self._send(render_start(), inject=False)
             elif path == "/api/root-mods":
                 # Consumed by start.html's JS; CORS-open so the page works even
                 # when opened directly as a file:// document.
@@ -3262,6 +4052,15 @@ class Handler(BaseHTTPRequestHandler):
                                 % purl("/areas")), 404)
                 return
             self._send(render_instance_form(root, ares, idx, entries[idx]))
+        elif sub == "/xref":
+            self._send(render_xref(proj, query.get("q", [""])[0]))
+        elif sub == "/history":
+            self._send(render_history(proj, query.get("msg", [""])[0]))
+        elif sub == "/palettes":
+            self._send(render_palettes(root))
+        elif sub == "/palette":
+            self._send(render_palette(root, query.get("p", [""])[0],
+                                      query.get("msg", [""])[0]))
         elif sub == "/module":
             if not os.path.isfile(module_ifo_path(root)):
                 self._send(page("No module.ifo",
@@ -3279,12 +4078,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST ---------------------------------------------------------------
     def do_POST(self):
-        _req.proxy = self.url_prefix
-        _req.slug = None
-        _req.project = None
+        self._begin()
         raw = urllib.parse.urlparse(self.path)
         path = self._strip_proxy(raw.path)
         try:
+            if not self._csrf_ok(path):
+                self._send(page("Request rejected",
+                                "<p class='err'>This form's security token is "
+                                "missing or expired (the console was "
+                                "restarted, or the request didn't come from "
+                                "one of its pages). Reload the page and try "
+                                "again.</p>"), 403)
+                return
             if path == "/shutdown":
                 self._shutdown()
                 return
@@ -3310,6 +4115,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._project_post(proj, sub, None)
                 return
             self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except common().StaleEditError as e:
+            self._send(page("Edit conflict", "<p class='err'>%s</p>" % esc(e)), 409)
         except Exception as e:  # noqa: BLE001
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
@@ -3361,9 +4168,10 @@ class Handler(BaseHTTPRequestHandler):
             resrefs = form.get("res", [])
             diffs, errors = apply_tags(root, proj.git_root, proj.gic_root,
                                        form, dry_run=True)
+            scan = render_rename_scans(root, proj.git_root, form)
             self._send(render_diff_preview(
                 "Edit area names / tags / resrefs", diffs, resrefs, form,
-                purl("/areas/tags/apply"), errors))
+                purl("/areas/tags/apply"), errors, scan))
         elif sub == "/areas/scripts/apply":
             self._send(apply_scripts(root, form))
         elif sub == "/areas/lighting/apply":
@@ -3412,6 +4220,29 @@ class Handler(BaseHTTPRequestHandler):
                             "<p><a href='%s'>Back to placed creatures</a></p>"
                             % purl("/areas/edit?action=edit_creatures&res="
                                    + urllib.parse.quote(ares))))
+        elif sub == "/history/restore":
+            try:
+                msg = apply_history_restore(proj, form)
+            except common().StaleEditError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                self._send(page("Restore failed",
+                                "<p class='err'>%s</p><p><a href='%s'>Back</a></p>"
+                                % (esc(e), purl("/history"))), 400)
+                return
+            self._redirect(purl("/history?msg=" + urllib.parse.quote(msg)))
+        elif sub == "/palette/apply":
+            key = form.get("p", [""])[0]
+            back = purl("/palette?p=" + urllib.parse.quote(key))
+            try:
+                msg = apply_palette(root, form)
+            except Exception as e:  # noqa: BLE001 - PaletteError, bad paths
+                stale = isinstance(e, common().StaleEditError)
+                self._send(page("Edit conflict" if stale else "Palette edit failed",
+                                "<p class='err'>%s</p><p><a href='%s'>Back</a></p>"
+                                % (esc(e), back)), 409 if stale else 400)
+                return
+            self._redirect(back + "&msg=" + urllib.parse.quote(msg))
         elif sub == "/creatures/select":
             resrefs = [r for r in form.get("res", [])
                        if os.path.isfile(utc_path(root, r))]
@@ -3676,6 +4507,9 @@ def main():
                          "(ambientmusic.2da/appearance.2da/feat.2da, e.g. "
                          "extracted from its HAKs) - resolves HAK-added or "
                          "HAK-overridden rows the stock tables don't cover")
+    ap.add_argument("--dialog-tlk", default=None, metavar="FILE",
+                    help="dialog.tlk used to show stock palette names "
+                         "(default: each project's tlk/dialog.tlk)")
     ap.add_argument("--custom-tlk", default=None, metavar="FILE",
                     help="this project's custom .tlk, for strrefs >= "
                          "0x01000000 in --twoda-dir's tables (see "
@@ -3685,6 +4519,9 @@ def main():
     if args.twoda_dir:
         global TWODA_DIR
         TWODA_DIR = os.path.abspath(args.twoda_dir)
+    if args.dialog_tlk:
+        global DIALOG_TLK
+        DIALOG_TLK = os.path.abspath(args.dialog_tlk)
     if args.custom_tlk:
         global CUSTOM_TLK
         CUSTOM_TLK = read_tlk(args.custom_tlk)

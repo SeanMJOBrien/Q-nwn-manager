@@ -112,7 +112,8 @@ today's `python3 <script>` behavior automatically when no compiled binary is
 found, so this is a pure add-on: nothing changes if you don't have one.
 
 Built from `bin/_pytools_main.py` (a small dispatcher wrapping
-`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`) via
+`nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`/
+`nwn-palette`) via
 `build/nwn-pytools.spec` (PyInstaller `--onedir`). See
 `.github/workflows/build-pytools.yml` for the per-platform build; run it
 manually from the Actions tab, or build locally:
@@ -246,6 +247,67 @@ The validator is also runnable on its own against any unpacked tree:
 ```sh
 check-dlg-integrity path/to/unpacked    # exit 1 if any dialog FAILs
 ```
+
+### Toolset palettes (`nwn-manager palette`, console **Palettes** page)
+
+Edit a project's `*palcus.itp.json` palettes (the creature/item/placeable/...
+trees the toolset shows) without the toolset. The console page lists the nine
+palettes with folder/blueprint counts, **unlisted blueprints** (project
+`.utc/.uti/...` no palette entry points at) and structural issues; each
+palette page is a filterable tree where you can rename, move (up/down or into
+a folder), delete, add folders, add a blueprint by resref, and bulk-file the
+unlisted blueprints (into `Custom` by default). The CLI does the same:
+
+```sh
+nwn-manager palette list
+nwn-manager palette tree item --leaves
+nwn-manager palette check                       # issues + unlisted, all palettes
+nwn-manager palette mkdir item / "My Gear"
+nwn-manager palette mv item crn_helm1 crn_helm2 --to "My Gear"
+nwn-manager palette sync creature --apply       # file unlisted blueprints
+nwn-manager palette rename item "My Gear" "Custom Gear" --dry-run
+```
+
+Nodes are addressed by index path (`0.3.2`, as `tree` prints) or by name /
+resref. Rules enforced: every node keeps a `NAME` or `STRREF`; folder `ID`s
+stay unique per palette (new folders take the next free one); blueprints with
+`PaletteID` 255 are never filed; an edit that would introduce a new structural
+problem is refused. Stock (`STRREF`) entries are shown by their real names when the
+project's `tlk/dialog.tlk` is present (else `(strref N)`; override with
+`--dialog-tlk`). Renaming one swaps it for a custom `NAME`. The first edit of a file writes a `.json.bak`.
+
+### Cross-reference (console **Find** page)
+
+`/xref?q=<name>` answers "where is this used?" for a tag, blueprint resref,
+script or variable name: every GFF JSON field that equals it (area, placed
+objects, dialogs, blueprints, palettes, `module.ifo`) with the field path,
+`.nss` source that quotes it, and object tags that contain it as a whole
+word. Files named for it are listed as "Defined by". Matches are exact and
+case-insensitive; compiled-only scripts and runtime-built names can't be seen.
+
+### Edit safety (console, palette tool, standalone editor)
+
+- **CSRF protection.** Every POST form carries a token tied to a
+  `SameSite=Strict` session cookie, and a POST without a valid one is rejected
+  (403). Browsers need no action; a script that POSTs to the console with
+  `curl` must first GET a page (keeping the cookie) and send its `_csrf` field.
+  `/shutdown` and the two project-creation routes used by the standalone
+  `start.html` (opened from `file://`, which has no session) are exempt.
+- **Stale-edit refusal.** Each form records when it was rendered; saving a
+  file that changed on disk after that (another tab, an unpack, another tool)
+  is refused with a 409 so nothing is silently overwritten - reload and redo
+  the edit. The confirm step of a bulk edit keeps the *original* render time.
+- **Edit history / undo.** In an nwn-manager project (a folder with
+  `nasher.cfg`) every file the console or `nwn-manager palette` overwrites is
+  first copied to `.nwn-manager/history/` (last 10 versions per file,
+  gitignored). The console's **History** page lists them with a Restore button
+  (a restore is itself snapshotted, so it can be undone); on the CLI,
+  `nwn-manager palette undo <palette>` restores the previous palette. The
+  one-time `.bak` copy of the very first original is still written too. The
+  standalone `.bic` editor only has `.bak`.
+- **Area rename report.** Besides rewriting `module.ifo`, a tag/resref rename
+  lists scripts quoting the old value and (console) placed objects whose tag
+  embeds it as a whole word (`AREA_VAULT`) - report only, never edited.
 
 ### Smoke tests
 

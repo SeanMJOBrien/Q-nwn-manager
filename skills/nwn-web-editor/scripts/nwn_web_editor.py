@@ -26,15 +26,20 @@ Usage:
 import argparse
 import copy
 import fnmatch
+import hashlib
+import hmac
 import html
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -71,8 +76,66 @@ def gff_load(path):
         os.unlink(tmp)
 
 
+# --- Request safety: CSRF token + stale-edit check --------------------------------
+# Self-contained copy of the logic in the repo's bin/nwn-common (this script is
+# installed as a standalone skill and can't import it). Every POST form gets a
+# token tied to a SameSite=Strict session cookie, plus the time the page was
+# rendered; gff_save refuses to overwrite a file modified after that time.
+
+_SECRET = secrets.token_bytes(32)
+_req = threading.local()
+COOKIE_NAME = "qnm_sid"
+
+
+class StaleEditError(Exception):
+    pass
+
+
+def csrf_token(sid):
+    return hmac.new(_SECRET, sid.encode(), hashlib.sha256).hexdigest()
+
+
+def sid_from_cookie(header):
+    for part in (header or "").split(";"):
+        name, _, value = part.strip().partition("=")
+        if name == COOKIE_NAME and re.fullmatch(r"[0-9a-f]{32}", value):
+            return value
+    return ""
+
+
+def inject_csrf(content, sid):
+    hidden = ("<input type='hidden' name='_csrf' value='%s'>"
+              "<input type='hidden' name='_rendered' value='%.6f'>"
+              % (csrf_token(sid), time.time()))
+    return re.sub(r"(<form\b[^>]*\bmethod=['\"]post['\"][^>]*>)",
+                  lambda m: m.group(1) + hidden, content, flags=re.I)
+
+
+def rendered_from_form(form):
+    vals = []
+    for v in form.get("_rendered", []):
+        try:
+            vals.append(float(v))
+        except ValueError:
+            pass
+    return min(vals) if vals else None
+
+
+def check_stale(path):
+    rendered = getattr(_req, "rendered", None)
+    if rendered is None or os.path.abspath(path) in getattr(_req, "written", ()):
+        return
+    if os.path.exists(path) and os.path.getmtime(path) > rendered:
+        raise StaleEditError(
+            "%s changed on disk after this page was loaded (another tab or "
+            "tool). Reload the page and redo the edit so nothing is "
+            "overwritten." % os.path.basename(path))
+
+
 def gff_save(path, data):
     """JSON dict -> GFF binary, with one-time .bak backup and atomic replace."""
+    check_stale(path)
+    getattr(_req, "written", set()).add(os.path.abspath(path))
     bak = path + ".bak"
     if os.path.exists(path) and not os.path.exists(bak):
         shutil.copy2(path, bak)
@@ -526,6 +589,7 @@ def render_areas(root, query):
                 "<button name='action' value='lighting'>Edit lighting/fog</button>"
                 "<button name='action' value='music'>Edit music</button>"
                 "<button name='action' value='tags'>Edit tags</button>"
+                "<button name='action' value='vars'>Edit variables</button>"
                 "</form>")
     body.append("<p class='note'>%d areas shown.</p>" % len(rows))
     return page("Areas", "".join(body))
@@ -739,16 +803,139 @@ def render_tags_form(root, resrefs):
             "<table><tr><th>ResRef</th><th>Name</th><th>Tag</th>"
             "<th>New ResRef (renames files!)</th></tr>%s</table>"
             "<p class='warn'>ResRef rename moves the .are/.git/.gic files on "
-            "disk and rewrites the ResRef field, but does NOT update door/"
-            "trigger transitions in other areas that target the old resref - "
-            "search those separately.</p>"
+            "disk, rewrites the ResRef field, and updates module.ifo's "
+            "Mod_Entry_Area / Mod_Area_list. Door and trigger transitions "
+            "target waypoint/door tags, not areas, so they are unaffected. "
+            "Scripts that quote the old tag or resref are listed after the "
+            "change but not edited.</p>"
             "<input type='submit' value='Apply'></form>" %
             (hidden_resrefs(resrefs), "".join(rows)))
     return page("Edit area tags / resrefs", body)
 
 
+# --- Reference-aware rename helpers --------------------------------------------
+# module.ifo is the only GFF data that names an area by resref
+# (Mod_Entry_Area, Mod_Area_list[].Area_Name), so a resref rename rewrites
+# those. door/trigger LinkedTo targets waypoint/door tags, never an area, so a
+# rename can't break one. A script can still quote the old tag/resref in a
+# string literal; that can't be rewritten safely, so it is only reported.
+# (Same logic as the console's nwn-area-editor, duplicated per the project's
+# between-editor convention.)
+SCRIPT_SCAN_CAP = 15
+
+
+def module_ifo_rewrites(root, renames):
+    """[(label, old, new)] module.ifo fields naming a renamed area, given
+    {old_resref: new_resref}. Read-only; [] without a module.ifo."""
+    path = os.path.join(root, "module.ifo")
+    if not renames or not os.path.isfile(path):
+        return []
+    d = gff_load(path)
+    out = []
+    entry = getv(d, "Mod_Entry_Area", "")
+    if str(entry).lower() in renames:
+        out.append(("module.ifo: Mod_Entry_Area", entry,
+                    renames[str(entry).lower()]))
+    for i, item in enumerate(getv(d, "Mod_Area_list", []) or []):
+        name = getv(item, "Area_Name", "")
+        if str(name).lower() in renames:
+            out.append(("module.ifo: Mod_Area_list[%d]" % i, name,
+                        renames[str(name).lower()]))
+    return out
+
+
+def apply_module_rewrites(root, renames):
+    path = os.path.join(root, "module.ifo")
+    d = gff_load(path)
+    n = 0
+    entry = str(getv(d, "Mod_Entry_Area", "")).lower()
+    if entry in renames:
+        setv(d, "Mod_Entry_Area", renames[entry], "resref")
+        n += 1
+    for item in getv(d, "Mod_Area_list", []) or []:
+        name = str(getv(item, "Area_Name", "")).lower()
+        if name in renames:
+            setv(item, "Area_Name", renames[name], "resref")
+            n += 1
+    if n:
+        gff_save(path, d)
+        invalidate(path)
+    return n
+
+
+def scan_script_references(root, needles):
+    """{needle: [(relpath, lineno, line)]} for quoted occurrences in .nss."""
+    needles = [n for n in dict.fromkeys(needles) if n]
+    hits = {n: [] for n in needles}
+    quoted = {n: '"%s"' % n.lower() for n in needles}
+    if not needles:
+        return hits
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for fn in sorted(files):
+            if not fn.lower().endswith(".nss"):
+                continue
+            full = os.path.join(dirpath, fn)
+            try:
+                with open(full, encoding="cp1252", errors="replace") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            rel = os.path.relpath(full, root)
+            for lineno, line in enumerate(lines, 1):
+                low = line.lower()
+                for n, q in quoted.items():
+                    if q in low:
+                        hits[n].append((rel, lineno, line.strip()[:120]))
+    return hits
+
+
+def pending_rename_needles(root, form):
+    """Old tag / old resref values a submitted tags form would replace."""
+    needles = []
+    for res in form.get("res", []):
+        try:
+            d = load_cached(os.path.join(root, res + ".are"))
+        except Exception:
+            continue
+        new_tag = form.get("tag_" + res, [""])[0].strip()
+        old_tag = getv(d, "Tag") or ""
+        if new_tag and new_tag != old_tag:
+            needles.append(old_tag)
+        new_ref = form.get("ref_" + res, [""])[0].strip().lower()
+        if new_ref and new_ref != res and re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
+            needles.append(res)
+    return needles
+
+
+def render_script_scan(hits):
+    if not hits:
+        return ""
+    found = {n: h for n, h in hits.items() if h}
+    if not found:
+        return ("<p class='note'>No script here quotes the old tag/resref "
+                "(<code>.nss</code> source only - compiled-only scripts "
+                "aren't checked).</p>")
+    parts = []
+    for needle, rows in found.items():
+        shown = rows[:SCRIPT_SCAN_CAP]
+        items = "".join("<li><code>%s:%d</code> %s</li>" %
+                        (esc(f), ln, esc(text)) for f, ln, text in shown)
+        more = ("<li class='note'>+%d more</li>" % (len(rows) - len(shown))
+                if len(rows) > len(shown) else "")
+        parts.append("<p>Scripts quoting <code>\"%s\"</code> (%d):</p><ul>%s%s</ul>"
+                     % (esc(needle), len(rows), items, more))
+    return ("<div class='warn'><b>Scripts still use the old value.</b> Not "
+            "changed automatically - check whether each is really a reference "
+            "to the renamed area and update it.</div>%s" % "".join(parts))
+
+
 def apply_tags(root, form, dry_run=False):
     resrefs, changed, errors, diffs = form.get("res", []), [], [], []
+    renames = {}  # old resref -> new resref, for the module.ifo cascade
+    # Read before any file is touched - the old values are gone afterwards.
+    scan_html = "" if dry_run else render_script_scan(
+        scan_script_references(root, pending_rename_needles(root, form)))
     for res in resrefs:
         path = os.path.join(root, res + ".are")
         d = gff_load(path)
@@ -766,13 +953,15 @@ def apply_tags(root, form, dry_run=False):
             if not re.fullmatch(r"[a-z0-9_]{1,16}", new_ref):
                 errors.append("%s: invalid resref %r" % (res, new_ref))
                 new_ref = ""
-            elif os.path.exists(os.path.join(root, new_ref + ".are")):
+            elif (os.path.exists(os.path.join(root, new_ref + ".are"))
+                  or new_ref in renames.values()):
                 errors.append("%s: %r already exists" % (res, new_ref))
                 new_ref = ""
         else:
             new_ref = ""
         if new_ref:
             touched = True
+            renames[res.lower()] = new_ref
             if dry_run:
                 diffs.append((res, "ResRef (renames .are/.git/.gic)",
                              res, new_ref))
@@ -789,10 +978,161 @@ def apply_tags(root, form, dry_run=False):
                 if os.path.exists(old_p):
                     os.replace(old_p, os.path.join(root, new_ref + ext))
                     invalidate(old_p)
+    # Cascade after the per-area writes; warn, never block, since the area
+    # rename itself has already succeeded by here.
+    try:
+        rewrites = module_ifo_rewrites(root, renames)
+        if dry_run:
+            by_new = {v: k for k, v in renames.items()}
+            diffs.extend((by_new.get(new, old), label, old, new)
+                         for label, old, new in rewrites)
+        elif rewrites:
+            apply_module_rewrites(root, renames)
+    except Exception as e:  # noqa: BLE001 - nwn_gff failures surface as CalledProcessError
+        errors.append("module.ifo could not be updated (%s) - set "
+                      "Mod_Entry_Area / Mod_Area_list to the new resref by "
+                      "hand" % e)
+    if dry_run:
+        return diffs, errors
+    extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors) + scan_html
+    return result_page("Tags updated", changed, resrefs, extra)
+
+
+# --- Area local variables (.git VarTable) -----------------------------------
+
+VAR_TYPES = {1: ("int", "int"), 2: ("float", "float"), 3: ("string", "cexostring")}
+VAR_TYPE_BY_NAME = {n: (t, g) for t, (n, g) in VAR_TYPES.items()}
+VAR_NEW_ROWS = 5
+
+
+def area_vars(d):
+    """VarTable entries of a .git dict as [(name, type_id, value)]."""
+    out = []
+    for e in (d.get("VarTable") or {}).get("value", []):
+        out.append((getv(e, "Name", ""), getv(e, "Type", 0), getv(e, "Value")))
+    return out
+
+
+def var_label(type_id):
+    return VAR_TYPES.get(type_id, ("type %s" % type_id,))[0]
+
+
+def render_vars_form(root, resrefs):
+    seen = {}  # name -> {"areas": n, "vals": set of "type=value"}
+    missing = []
+    for res in resrefs:
+        gp = os.path.join(root, res + ".git")
+        if not os.path.exists(gp):
+            missing.append(res)
+            continue
+        for name, t, v in area_vars(load_cached(gp)):
+            ent = seen.setdefault(name, {"areas": 0, "vals": set()})
+            ent["areas"] += 1
+            ent["vals"].add("%s = %s" % (var_label(t), v))
+    existing = "".join(
+        "<tr><td><input type='checkbox' name='delvar' value='%s'></td>"
+        "<td>%s</td><td>%d of %d</td><td class='note'>%s</td></tr>" %
+        (esc(n), esc(n), e["areas"], len(resrefs), esc("; ".join(sorted(e["vals"]))))
+        for n, e in sorted(seen.items()))
+    if not existing:
+        existing = "<tr><td colspan='4'><i>(no variables on the selected areas)</i></td></tr>"
+    type_opts = "".join("<option>%s</option>" % n for n in VAR_TYPE_BY_NAME)
+    new_rows = "".join(
+        "<tr><td><input type='text' name='set_name_%d'></td>"
+        "<td><select name='set_type_%d'>%s</select></td>"
+        "<td><input type='text' name='set_value_%d'></td></tr>" % (i, i, type_opts, i)
+        for i in range(VAR_NEW_ROWS))
+    warn = ("<p class='err'>No .git file for: %s (skipped)</p>" %
+            esc(", ".join(missing))) if missing else ""
+    body = ("<p>Editing <b>%d</b> area(s): %s</p>%s"
+            "<form method='post' action='/areas/vars/preview'>%s"
+            "<fieldset><legend>Existing variables</legend>"
+            "<table><tr><th>Delete</th><th>Name</th><th>On areas</th>"
+            "<th>Current value(s)</th></tr>%s</table></fieldset>"
+            "<fieldset><legend>Set variables</legend>"
+            "<table><tr><th>Name</th><th>Type</th><th>Value</th></tr>%s</table>"
+            "<p class='note'>Sets the variable on every selected area, "
+            "replacing it if it already exists (including its type). Blank "
+            "name rows are ignored. Object/location variables are never "
+            "touched.</p></fieldset>"
+            "<input type='submit' value='Apply to selected areas'></form>" %
+            (len(resrefs), esc(", ".join(resrefs)), warn, hidden_resrefs(resrefs),
+             existing, new_rows))
+    return page("Bulk edit area variables", body)
+
+
+def parse_var_sets(form):
+    """-> ([(name, type_id, gff_type, value)], [errors]) from set_* rows."""
+    sets, errors = [], []
+    for i in range(VAR_NEW_ROWS):
+        name = form.get("set_name_%d" % i, [""])[0].strip()
+        if not name:
+            continue
+        tname = form.get("set_type_%d" % i, ["int"])[0]
+        raw = form.get("set_value_%d" % i, [""])[0]
+        type_id, gff_type = VAR_TYPE_BY_NAME.get(tname, VAR_TYPE_BY_NAME["int"])
+        try:
+            value = (int(raw.strip() or "0") if tname == "int" else
+                     float(raw.strip() or "0") if tname == "float" else raw)
+        except ValueError:
+            errors.append("%s: %r is not a valid %s" % (name, raw, tname))
+            continue
+        sets.append((name, type_id, gff_type, value))
+    return sets, errors
+
+
+def apply_vars(root, form, dry_run=False):
+    resrefs, changed, errors, diffs = form.get("res", []), [], [], []
+    sets, errors = parse_var_sets(form)
+    deletes = set(form.get("delvar", []))
+    for res in resrefs:
+        path = os.path.join(root, res + ".git")
+        if not os.path.exists(path):
+            errors.append("%s: no .git file (skipped)" % res)
+            continue
+        d = gff_load(path)
+        vt = d.get("VarTable")
+        if not (isinstance(vt, dict) and isinstance(vt.get("value"), list)):
+            vt = d["VarTable"] = {"type": "list", "value": []}
+        entries = vt["value"]
+        touched = False
+        for e in list(entries):
+            name = getv(e, "Name", "")
+            if name in deletes and getv(e, "Type", 0) in VAR_TYPES:
+                touched = True
+                diffs.append((res, name, "%s = %s" % (var_label(getv(e, "Type", 0)),
+                                                      getv(e, "Value")), "(deleted)"))
+                entries.remove(e)
+        for name, type_id, gff_type, value in sets:
+            cur = next((e for e in entries if getv(e, "Name", "") == name), None)
+            if cur is not None and getv(cur, "Type", 0) not in VAR_TYPES:
+                errors.append("%s: %s is an object/location variable (skipped)"
+                              % (res, name))
+                continue
+            old = ("%s = %s" % (var_label(getv(cur, "Type", 0)), getv(cur, "Value"))
+                   if cur is not None else None)
+            new = "%s = %s" % (var_label(type_id), value)
+            if old == new:
+                continue
+            touched = True
+            diffs.append((res, name, old, new))
+            entry = {"__struct_id": 0,
+                     "Name": {"type": "cexostring", "value": name},
+                     "Type": {"type": "dword", "value": type_id},
+                     "Value": {"type": gff_type, "value": value}}
+            if cur is None:
+                entries.append(entry)
+            else:
+                entries[entries.index(cur)] = entry
+        if touched:
+            changed.append(res)
+            if not dry_run:
+                gff_save(path, d)
+                invalidate(path)
     if dry_run:
         return diffs, errors
     extra = "".join("<p class='err'>%s</p>" % esc(e) for e in errors)
-    return result_page("Tags updated", changed, resrefs, extra)
+    return result_page("Variables updated", changed, resrefs, extra)
 
 
 def result_page(title, changed, selected, extra=""):
@@ -803,7 +1143,8 @@ def result_page(title, changed, selected, extra=""):
     return page(title, body)
 
 
-def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
+def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None,
+                        extra_html=""):
     """Old -> new confirmation step shared by every bulk area editor. `form`
     is re-emitted as hidden inputs so 'Confirm & Apply' resubmits exactly
     what was submitted here - the real apply_* runs are unchanged; this
@@ -827,11 +1168,11 @@ def render_diff_preview(title, diffs, resrefs, form, apply_action, errors=None):
         "area(s):</p>"
         "<table><tr><th>Area</th><th>Field</th><th>Current</th>"
         "<th>New</th></tr>%s</table>"
-        "<form method='post' action='%s'>%s"
+        "%s<form method='post' action='%s'>%s"
         "<input type='submit' value='Confirm &amp; Apply'></form>"
         "<p><a href='/areas'>Cancel - back to areas</a></p>" %
         (err_html, len(diffs), len({d[0] for d in diffs}), len(resrefs),
-         rows, apply_action, hidden))
+         rows, extra_html, apply_action, hidden))
     return page(title + " - preview", body)
 
 
@@ -1380,7 +1721,16 @@ class Handler(BaseHTTPRequestHandler):
             path = path[len(self.url_prefix):] or "/"
         return path
 
+    def _begin(self):
+        _req.rendered = None
+        _req.written = set()
+        sid = sid_from_cookie(self.headers.get("Cookie"))
+        _req.new_sid = not sid
+        _req.sid = sid or secrets.token_hex(16)
+        self._form_cache = None
+
     def _send(self, content, code=200):
+        content = inject_csrf(content, _req.sid)
         if self.url_prefix:
             # every internal URL in the app is a single-quoted absolute path
             content = (content
@@ -1390,18 +1740,26 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        if _req.new_sid:
+            self.send_header("Set-Cookie", "%s=%s; Path=/; HttpOnly; "
+                             "SameSite=Strict" % (COOKIE_NAME, _req.sid))
         self.end_headers()
         self.wfile.write(data)
 
     def _form(self):
-        length = int(self.headers.get("Content-Length", 0))
-        return urllib.parse.parse_qs(self.rfile.read(length).decode(),
-                                     keep_blank_values=True)
+        # Memoised: the body can only be read once and do_POST reads it first
+        # to verify the CSRF token.
+        if getattr(self, "_form_cache", None) is None:
+            length = int(self.headers.get("Content-Length", 0))
+            self._form_cache = urllib.parse.parse_qs(
+                self.rfile.read(length).decode(), keep_blank_values=True)
+        return self._form_cache
 
     def log_message(self, fmt, *args):  # quieter default log
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     def do_GET(self):
+        self._begin()
         url = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(url.query)
         path = self._path()
@@ -1438,7 +1796,8 @@ class Handler(BaseHTTPRequestHandler):
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
                           "music": render_music_form,
-                          "tags": render_tags_form}.get(action, render_scripts_form)
+                          "tags": render_tags_form,
+                          "vars": render_vars_form}.get(action, render_scripts_form)
                 self._send(render(self.root, resrefs))
             elif path == "/creatures":
                 self._send(render_creatures(self.root, query))
@@ -1467,9 +1826,20 @@ class Handler(BaseHTTPRequestHandler):
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
     def do_POST(self):
+        self._begin()
         url = urllib.parse.urlparse(self.path)
         form = self._form()
         path = self._path()
+        sid = sid_from_cookie(self.headers.get("Cookie"))
+        if not (sid and any(hmac.compare_digest(csrf_token(sid), t)
+                            for t in form.get("_csrf", []))):
+            self._send(page("Request rejected",
+                            "<p class='err'>This form's security token is "
+                            "missing or expired (the editor was restarted, or "
+                            "the request didn't come from one of its pages). "
+                            "Reload the page and try again.</p>"), 403)
+            return
+        _req.rendered = rendered_from_form(form)
         try:
             if path == "/areas/select":
                 resrefs = form.get("res", [])
@@ -1481,7 +1851,8 @@ class Handler(BaseHTTPRequestHandler):
                 render = {"scripts": render_scripts_form,
                           "lighting": render_lighting_form,
                           "music": render_music_form,
-                          "tags": render_tags_form}[action]
+                          "tags": render_tags_form,
+                          "vars": render_vars_form}[action]
                 self._send(render(self.root, resrefs))
             elif path == "/areas/scripts/preview":
                 resrefs = form.get("res", [])
@@ -1504,9 +1875,19 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/areas/tags/preview":
                 resrefs = form.get("res", [])
                 diffs, errors = apply_tags(self.root, form, dry_run=True)
+                scan = render_script_scan(scan_script_references(
+                    self.root, pending_rename_needles(self.root, form)))
                 self._send(render_diff_preview(
                     "Edit area tags / resrefs", diffs, resrefs, form,
-                    "/areas/tags/apply", errors))
+                    "/areas/tags/apply", errors, scan))
+            elif path == "/areas/vars/preview":
+                resrefs = form.get("res", [])
+                diffs, errors = apply_vars(self.root, form, dry_run=True)
+                self._send(render_diff_preview(
+                    "Bulk edit area variables", diffs, resrefs, form,
+                    "/areas/vars/apply", errors))
+            elif path == "/areas/vars/apply":
+                self._send(apply_vars(self.root, form))
             elif path == "/areas/scripts/apply":
                 self._send(apply_scripts(self.root, form))
             elif path == "/areas/lighting/apply":
@@ -1542,6 +1923,8 @@ class Handler(BaseHTTPRequestHandler):
                                 "<p><a href='/module'>Back</a></p>" % esc(msg)))
             else:
                 self._send(page("Not found", "<p>No such action.</p>"), 404)
+        except StaleEditError as e:
+            self._send(page("Edit conflict", "<p class='err'>%s</p>" % esc(e)), 409)
         except Exception as e:
             self._send(page("Error", "<p class='err'>%s</p>" % esc(e)), 500)
 
