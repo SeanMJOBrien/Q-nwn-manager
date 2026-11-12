@@ -1,5 +1,15 @@
 # TODO
 
+## Quests page (console)
+
+Follow-ups and their order are kept in one place for the three repos involved:
+`../Q-nwn-mcp/docs/quest-frontends-work-plan.md`. The packages that touch this
+repo: L1-L3 (commit, rebuild the `nwn-pytools` binaries so the frozen console
+has the page, glibc), T2 (completability check after a build), T5 (undo a
+whole quest), T6 (Windows, macOS, `--url-prefix`, `--wiki-shell` are untested),
+U1-U5 (base-game pick lists, map picker, plain fields, errors at the field,
+quests made elsewhere), P1-P2 (one-file builder shipped here).
+
 ## Module settings (console)
 
 - `Mod_HakList` / `Mod_CustomTlk` aren't editable. Deliberately deferred when

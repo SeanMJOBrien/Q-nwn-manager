@@ -169,6 +169,16 @@ def json_save(path, data):
     os.replace(tmp, path)
 
 
+def text_save(path, text):
+    """Write a text resource (a script), with the same stale-edit refusal and
+    history snapshot as json_save, and an atomic replace."""
+    guard_write(path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
 def load_cached(path):
     mtime = os.path.getmtime(path)
     hit = _CACHE.get(path)
@@ -235,6 +245,22 @@ def esc(s):
     return html.escape(str(s), quote=True)
 
 
+# Layout of the Quests page (bin/quest_assets/quests.js); no fixed colours, so
+# it sits in both the console's own theme and an embedding wiki shell.
+QUEST_CSS = """.q-layout{display:grid;grid-template-columns:15em minmax(0,1fr) 24em;gap:1.2em;align-items:start}
+@media (max-width:1100px){.q-layout{grid-template-columns:1fr}}
+.q-field{display:block;margin:.5em 0} .q-label{display:block;font-weight:bold;font-size:.9em}
+.q-field input[type=text],.q-field input[type=number],.q-field select,.q-field textarea{
+ width:100%;box-sizing:border-box;font:inherit}
+.q-field input[type=number]{width:8em} .q-hint{font-size:.85em}
+.q-missing{outline:2px solid #e6a23c}
+.q-row{display:flex;gap:.3em;align-items:center;flex-wrap:wrap} .q-grow{flex:1}
+.q-group{border-left:3px solid #8886;padding-left:.8em;margin:.3em 0}
+.q-more{margin:.6em 0} .q-presets{margin:.4em 0}
+.q-item{padding:.4em 0;border-bottom:1px solid #8886} .q-current{font-weight:bold}
+.q-side{position:sticky;top:.5em} .q-side table{font-size:.9em}
+"""
+
 CSS = """
 body{font-family:system-ui,sans-serif;margin:1.5em;background:#1e1f24;color:#d8d9de}
 a{color:#7ab3ff} table{border-collapse:collapse;margin:1em 0}
@@ -266,7 +292,8 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:#2a2b31}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:#333}
 .sort-arrow{font-size:.8em}
 tr.qnm-linked{background:#3a2f1a}
-"""
+.q-field textarea{background:#2a2b31;color:#d8d9de;border:1px solid #555;padding:.2em .4em}
+""" + QUEST_CSS
 
 NAV_EXTRA = []   # [(label, url)] external links appended to the nav bar
 WIKI_SHELL = ""  # nwn-wiki embed-shell.html template ({{TITLE}}/{{BODY}}/{{ROOT}})
@@ -294,7 +321,7 @@ table.areas thead th{position:sticky;top:0;z-index:2;background:Canvas}
 th.sortable{cursor:pointer;user-select:none} th.sortable:hover{background:Canvas}
 .sort-arrow{font-size:.8em}
 tr.qnm-linked{background:rgba(184,134,11,.15)}
-"""
+""" + QUEST_CSS
 
 
 def _nav():
@@ -310,6 +337,8 @@ def _nav():
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
         if proj and proj.has_module():
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+        if proj and quests_possible(proj):
+            links.append("<a href='%s'>Quests</a>" % purl("/quests"))
         links.append("<a href='%s'>Find</a>" % purl("/xref"))
         if proj and proj.history_dir():
             links.append("<a href='%s'>History</a>" % purl("/history"))
@@ -322,6 +351,7 @@ def _nav():
             links.append("<a href='%s'>Creatures</a>" % purl("/creatures"))
             links.append("<a href='%s'>Palettes</a>" % purl("/palettes"))
             links.append("<a href='%s'>Module</a>" % purl("/module"))
+            links.append("<a href='%s'>Quests</a>" % purl("/quests"))
             links.append("<a href='%s'>Find</a>" % purl("/xref"))
             links.append("<a href='%s'>History</a>" % purl("/history"))
             links.append("<a href='%s'>Area Map</a>" % purl("/areas/map"))
@@ -3567,6 +3597,107 @@ def apply_palette(root, form):
 
 # --- Edit history (undo) ------------------------------------------------------
 
+# --- Quests ----------------------------------------------------------------------
+# The quest logic is Q-nwn-mcp's builder, run by bin/nwn-quests. This section
+# is the page, the JSON routes behind it, and the one step the console owns:
+# copying the builder's staged files into the project through guard_write.
+
+_QUESTS_LIB = None
+
+
+def quests_lib():
+    global _QUESTS_LIB
+    if _QUESTS_LIB is None:
+        _QUESTS_LIB = _load_sibling("nwn-quests")
+    return _QUESTS_LIB
+
+
+def quests_possible(proj):
+    """The builder reads one flat source folder, so areas' .git/.gic must be
+    in unpacked/ too (true for every project; not for a split --git-dir)."""
+    return (proj.has_module() and proj.git_root == proj.unpacked
+            and proj.gic_root == proj.unpacked)
+
+
+def render_quests(proj):
+    if not quests_possible(proj):
+        return page("Quests", "<p class='err'>Quests need a whole module in one "
+                              "folder (module.ifo.json, areas and their .git files).</p>")
+    js_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "quest_assets", "quests.js")
+    with open(js_path, encoding="utf-8") as fh:
+        script = fh.read()
+    # The empty POST form is where page() injects the CSRF token the script sends.
+    body = ("<form method='post' id='quests-token' action='%s' hidden></form>"
+            "<div id='quests-app' data-base='%s'></div><script>%s</script>"
+            % (esc(purl("/quests")), esc(purl("/quests")), script))
+    return page("Quests", body)
+
+
+def quest_target(proj, name):
+    return os.path.join(proj.unpacked, name)
+
+
+def apply_quest_files(proj, staged_dir, files, started):
+    """Copy the builder's staged files into the project. A file that changed
+    after the builder started reading the project is a conflict: all files are
+    checked before the first is written, so nothing is half applied."""
+    lib = quests_lib()
+    _req.rendered = started
+    changes = lib.staged_changes(staged_dir, files, lambda name: quest_target(proj, name))
+    for change in changes:
+        common().check_stale(os.path.abspath(change["target"]), started)
+    for change in changes:
+        if change["kind"] == "json":
+            json_save(change["target"], change["data"])
+        else:
+            text_save(change["target"], change["data"])
+        invalidate(change["target"])
+    return {"written": [{"name": c["name"], "new": c["new"]} for c in changes],
+            "unchanged": len(files) - len(changes)}
+
+
+def quest_refuse_duplicate(proj, spec):
+    """A new quest whose tag is taken would silently replace that quest."""
+    lib = quests_lib()
+    tag = lib.spec_tag(spec)
+    for quest in lib.list_quests(proj.root, proj.unpacked):
+        if quest["tag"].lower() == tag:
+            raise lib.QuestError(
+                "a quest with the tag %s is already here (%s). Open it from the list to "
+                "change it, or give this one another name." % (tag, quest["name"]))
+
+
+def quest_build(proj, spec):
+    """Stage, compile-check, apply; then keep the spec with the project."""
+    lib = quests_lib()
+    started = time.time()
+    with tempfile.TemporaryDirectory(prefix="nwnmgr-quest-out-") as out:
+        result = lib.stage_build(proj.unpacked, spec, out)
+        files = (result.get("source") or {}).get("files") or []
+        compiled = lib.compile_check(out, proj.unpacked)
+        if compiled and not compiled["ok"]:
+            raise lib.QuestError("the quest scripts did not compile, so nothing was "
+                                 "written:\n" + compiled["output"][-1500:])
+        applied = apply_quest_files(proj, out, files, started)
+    applied["compile"] = compiled
+    saved = dict(spec)
+    saved["tag"] = result.get("tag") or lib.spec_tag(spec)
+    lib.save_spec(proj.root, saved)
+    return result, applied
+
+
+def quest_remove(proj, tag):
+    lib = quests_lib()
+    started = time.time()
+    with tempfile.TemporaryDirectory(prefix="nwnmgr-quest-out-") as out:
+        result = lib.stage_remove(proj.unpacked, tag, out)
+        files = (result.get("source") or {}).get("files") or []
+        applied = apply_quest_files(proj, out, files, started)
+    applied["compile"] = {"checked": 0, "ok": True, "output": ""}
+    return result, applied
+
+
 def render_history(proj, msg=""):
     com = common()
     hist = proj.history_dir()
@@ -3765,9 +3896,11 @@ def render_project_home(proj):
                 "feats, appearance.</p>"
                 "<p><a href='%s'>Palettes</a> - toolset palette folders and "
                 "blueprint entries (*palcus.itp).</p>"
-                "<p><a href='%s'>Module info</a> - name &amp; description.</p></div>"
+                "<p><a href='%s'>Module info</a> - name &amp; description.</p>"
+                "<p><a href='%s'>Quests</a> - add a quest from a short form: "
+                "journal, dialog lines and wiring are written for you.</p></div>"
                 % (purl("/areas"), n, purl("/creatures"), proj.creature_count(),
-                   purl("/palettes"), purl("/module")))
+                   purl("/palettes"), purl("/module"), purl("/quests")))
 
     ingest = ("<form method='post' action='%s'>"
               "<button type='submit'>Re-ingest from source .mod</button></form>"
@@ -4052,6 +4185,10 @@ class Handler(BaseHTTPRequestHandler):
                                 % purl("/areas")), 404)
                 return
             self._send(render_instance_form(root, ares, idx, entries[idx]))
+        elif sub == "/quests":
+            self._send(render_quests(proj))
+        elif sub.startswith("/quests/"):
+            self._quests_get(proj, sub[len("/quests"):], query)
         elif sub == "/xref":
             self._send(render_xref(proj, query.get("q", [""])[0]))
         elif sub == "/history":
@@ -4128,6 +4265,9 @@ class Handler(BaseHTTPRequestHandler):
         if form is None:
             form = self._form()
         root = proj.unpacked
+        if sub.startswith("/quests/"):
+            self._quests_post(proj, sub[len("/quests"):], form)
+            return
         if sub == "/areas/select":
             resrefs = form.get("res", [])
             action = form.get("action", [""])[0]
@@ -4400,6 +4540,61 @@ class Handler(BaseHTTPRequestHandler):
                   on_success=on_success)
         start_job(job)
         self._redirect(gurl("/jobs/" + job.id))
+
+    # -- quests (JSON routes behind bin/quest_assets/quests.js) -------------
+    def _quests_get(self, proj, sub, query):
+        lib = quests_lib()
+        try:
+            if not quests_possible(proj):
+                raise lib.QuestError("this project has no whole module to add quests to")
+            if sub == "/data":
+                info = lib.info()
+                self._send_json({"ok": True, "info": info,
+                                 "schema": lib.schema() if info["ready"] else None,
+                                 "quests": lib.list_quests(proj.root, proj.unpacked)})
+            elif sub == "/contents":
+                self._send_json({"ok": True, "contents": lib.contents(proj.unpacked)})
+            elif sub == "/spec":
+                self._send_json({"ok": True, "spec": lib.load_spec(
+                    proj.root, query.get("tag", [""])[0])})
+            else:
+                self._send_json({"ok": False, "error": "no such quest route"}, 404)
+        except lib.QuestError as e:
+            self._send_json({"ok": False, "error": str(e)})
+
+    def _quests_post(self, proj, sub, form):
+        lib = quests_lib()
+        try:
+            if not quests_possible(proj):
+                raise lib.QuestError("this project has no whole module to add quests to")
+            spec = None
+            if sub in ("/plan", "/build", "/save"):
+                try:
+                    spec = json.loads(form.get("spec", [""])[0])
+                except ValueError:
+                    raise lib.QuestError("the quest spec is not valid JSON")
+                if form.get("new", [""])[0] == "1":
+                    quest_refuse_duplicate(proj, spec)
+            tag = form.get("tag", [""])[0].strip().lower()
+            out = {"ok": True}
+            if sub == "/plan":
+                out["result"] = lib.plan(proj.unpacked, spec)
+            elif sub == "/build":
+                out["result"], out["applied"] = quest_build(proj, spec)
+            elif sub == "/remove":
+                out["result"], out["applied"] = quest_remove(proj, tag)
+            elif sub == "/save":
+                out["tag"] = lib.save_spec(proj.root, spec)
+            elif sub == "/delete":
+                lib.delete_spec(proj.root, tag)
+            else:
+                self._send_json({"ok": False, "error": "no such quest action"}, 404)
+                return
+            if sub != "/plan":
+                out["quests"] = lib.list_quests(proj.root, proj.unpacked)
+            self._send_json(out)
+        except (lib.QuestError, common().StaleEditError) as e:
+            self._send_json({"ok": False, "error": str(e)})
 
     # -- static/download helpers -------------------------------------------
     def _serve_static(self, docroot, rel):

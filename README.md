@@ -110,6 +110,10 @@ layout and discovery order as `nasher`/`nwn_gff`/`nwnsc` above), both
 never invoked, and the `-h` preflight check for it is skipped. Falls back to
 today's `python3 <script>` behavior automatically when no compiled binary is
 found, so this is a pure add-on: nothing changes if you don't have one.
+Set `NWN_MANAGER_USE_PYTHON=1` to run the scripts in `bin/` with `python3`
+even when a binary is present: needed while changing those scripts (the binary
+only changes when it is rebuilt) and on a host whose C library is older than
+the one the binary was built against.
 
 Built from `bin/_pytools_main.py` (a small dispatcher wrapping
 `nwn-wiki`/`nwn-area-editor`/`nwn-wiki-activity`/`check-dlg-integrity`/
@@ -284,6 +288,53 @@ objects, dialogs, blueprints, palettes, `module.ifo`) with the field path,
 `.nss` source that quotes it, and object tags that contain it as a whole
 word. Files named for it are listed as "Defined by". Matches are exact and
 case-insensitive; compiled-only scripts and runtime-built names can't be seen.
+
+### Quests (console **Quests** page)
+
+Add a quest to a module from a form, with no LLM and no scripting: name it,
+pick the quest giver, pick an outline (kill, fetch, deliver, rescue, escort,
+investigate, persuade or fight, errand), fill in the stages. The page writes
+the journal entries, the dialog lines (merged into each NPC's own
+conversation), the stage variables on every object involved, the event
+wiring and the shared quest scripts.
+
+1. **Check the plan** reads the module and lists the stages, the dialog
+   lines and any warnings. Nothing is changed.
+2. **Build into the module** writes the files. The quest scripts are compiled
+   with the bundled `nwnsc` first; if they do not compile, nothing is written.
+   Every changed file gets a History snapshot, so a quest can be undone.
+3. **Build module** on the project page compiles and packs the `.mod` as usual.
+
+Fields that name something in the module (giver, creature, item, area,
+placeable, waypoint) offer a pick list read from `unpacked/`. Less common
+options (skill checks, rewards, spawns, branches) are under "More options" on
+each stage. A built quest is kept as `quests/<tag>.json` in the project
+(outside `unpacked/`, so it is never packed): open it from the list to change
+and rebuild it - a rebuild replaces only what that quest made. **Remove**
+takes a quest out of the module and keeps it as a draft. Journal quests made
+by hand or by another tool are listed but cannot be edited here.
+
+The quest logic is not in this repo. It is
+the Q-nwn-mcp project's quest builder (whole-party quests on the
+engine's own journal; reference: `docs/quest-system.md` there), run through
+its command line; `bin/nwn-quests` is the bridge. Setup:
+
+- Check out Q-nwn-mcp next to this repo and run `npm install && npm run build`
+  there, or set `NWN_QUEST_CLI` to its `dist/cli/quest.js`.
+- Node.js 20 or newer on `PATH` (or `NODE`).
+- Optional: `NWN_FOLDER_DATA` = an NWN install. Without it a quest can only
+  name creatures and items that are in the module, and cannot place a kill
+  target or spawn point by area.
+
+The page says what is missing when it cannot run. The builder never writes
+the project: it reads `unpacked/` and puts the changed files in a scratch
+folder, and the console copies them in through the same stale-edit check and
+history as every other edit (a file that changed while the builder ran is a
+conflict, and then nothing is written). The form's fields come from the
+builder's own JSON Schema, so a new builder option appears under "More
+options" without a change here. Tests: `python3 tests/test_quests.py` (fake
+builder), `tests/ui/quests_smoke.js` (real browser, real builder, on a scratch
+copy of a project).
 
 ### Edit safety (console, palette tool, standalone editor)
 

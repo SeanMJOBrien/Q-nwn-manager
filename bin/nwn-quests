@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+"""nwn-quests - quest building for the console (bin/nwn-area-editor), no LLM.
+
+The quest logic is not here. It is Q-nwn-mcp's quest builder (a parameter-driven,
+whole-party quest system: journal, dialog lines, stage variables, event wiring),
+run through its command line, `node <Q-nwn-mcp>/dist/cli/quest.js`:
+
+  - plan:   `build --dry-run` reads the project's unpacked/ and reports what a
+            quest would write. Nothing changes.
+  - stage:  `build --out <tmp>` writes the changed files into a scratch folder.
+            The project's unpacked/ is never written by the builder.
+  - check:  the staged scripts are compiled with this repo's nwnsc.
+  - apply:  the console copies the staged files into unpacked/ through its own
+            guard_write (stale-edit refusal + history snapshot), so a quest can
+            be undone from the History page like any other edit.
+
+Saved quest specs live in <project>/quests/<tag>.json (outside unpacked/, so
+nasher never packs them). A spec is the whole quest; rebuilding it replaces only
+what that quest made earlier.
+
+Configuration (environment):
+  NWN_QUEST_CLI        path to Q-nwn-mcp's dist/cli/quest.js
+                       (default: ../Q-nwn-mcp/dist/cli/quest.js next to this repo)
+  NODE                 node executable (default: `node` on PATH)
+  NIM_FOLDER_NWTOOLS   folder holding nwn_gff (default: where nwn_gff is on PATH,
+                       which `nwn-manager console` sets up from nwn-tools/)
+  NWN_FOLDER_DATA      optional NWN install, lets a quest name base-game
+                       creatures and items that are not in the module
+"""
+
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+
+SPEC_DIR = "quests"
+CLI_TIMEOUT = 600        # seconds; a plan on 8,000 resources takes about 5
+COMPILE_TIMEOUT = 300
+TAG_MAX = 27             # the builder's limit for a quest tag
+TAG_RE = re.compile(r"^[a-z][a-z0-9_]{0,%d}$" % (TAG_MAX - 1))
+FLOAT_TYPES = ("float", "double")
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO = os.path.dirname(_HERE)
+_schema_cache = {}
+_contents_cache = {}
+_locks = {}
+_locks_guard = threading.Lock()
+
+
+class QuestError(Exception):
+    pass
+
+
+# --- locating the builder and the tools ------------------------------------------
+
+def cli_path(env=None):
+    env = os.environ if env is None else env
+    given = env.get("NWN_QUEST_CLI")
+    cands = [os.path.expanduser(given)] if given else [
+        os.path.join(os.path.dirname(_REPO), name, "dist", "cli", "quest.js")
+        for name in ("Q-nwn-mcp", "nwn-mcp")]
+    for cand in cands:
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def node_path(env=None):
+    env = os.environ if env is None else env
+    return env.get("NODE") or shutil.which("node")
+
+
+def _tools_platform():
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macos_arm64"
+    return "win" if system.startswith("win") else "linux"
+
+
+def _tool(name, subdir):
+    """A bundled tool: on PATH (the nwn-manager wrapper puts nwn-tools there),
+    else in this repo's nwn-tools/<platform>/<subdir>/."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for root in (os.environ.get("NWN_TOOLS_DIR"), os.path.join(_REPO, "nwn-tools"),
+                 os.path.join(os.path.dirname(_REPO), "nwn-tools")):
+        if not root:
+            continue
+        for exe in (name, name + ".exe"):
+            cand = os.path.join(root, _tools_platform(), subdir, exe)
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def base_scripts_dir():
+    cands = [os.environ.get("NWN_BASE_SCRIPTS_DIR")]
+    if os.environ.get("NWN_TOOLS_DIR"):
+        cands.append(os.path.join(os.environ["NWN_TOOLS_DIR"], "base-scripts"))
+    cands += [os.path.join(_REPO, "nwn-tools", "base-scripts"),
+              os.path.join(os.path.dirname(_REPO), "nwn-tools", "base-scripts")]
+    for cand in cands:
+        if cand and os.path.isdir(cand):
+            return cand
+    return None
+
+
+def cli_env():
+    """The builder's environment: it needs to know where nwn_gff is."""
+    env = dict(os.environ)
+    if not env.get("NIM_FOLDER_NWTOOLS"):
+        gff = _tool("nwn_gff", "neverwinter")
+        if gff:
+            env["NIM_FOLDER_NWTOOLS"] = os.path.dirname(gff)
+    return env
+
+
+def info():
+    problems = []
+    if not node_path():
+        problems.append("node was not found on PATH (install Node.js 20 or newer, or set NODE)")
+    if not cli_path():
+        problems.append("the quest builder was not found: check out Q-nwn-mcp next to this "
+                        "repo and run `npm install && npm run build` there, or set "
+                        "NWN_QUEST_CLI to its dist/cli/quest.js")
+    if not cli_env().get("NIM_FOLDER_NWTOOLS"):
+        problems.append("nwn_gff was not found (start the console with `nwn-manager console`, "
+                        "or set NIM_FOLDER_NWTOOLS)")
+    notes = []
+    if not os.environ.get("NWN_FOLDER_DATA"):
+        notes.append("NWN_FOLDER_DATA is not set: a quest can only name creatures and items "
+                     "that are in the module, and cannot place a kill target or spawn point "
+                     "by area.")
+    if not (_tool("nwnsc", "nwnsc") and base_scripts_dir()):
+        notes.append("nwnsc or the base scripts were not found: quest scripts are not "
+                     "compile-checked before they are written (Build module still compiles them).")
+    return {"ready": not problems, "problems": problems, "notes": notes, "cli": cli_path()}
+
+
+def project_lock(unpacked):
+    """One builder run per project at a time (it locks a temp dir per source path)."""
+    key = os.path.abspath(unpacked)
+    with _locks_guard:
+        return _locks.setdefault(key, threading.Lock())
+
+
+def run_cli(args):
+    """Run the quest CLI; return its `result`, or raise QuestError with its message."""
+    cli, node = cli_path(), node_path()
+    if not cli or not node:
+        raise QuestError("; ".join(info()["problems"]))
+    try:
+        proc = subprocess.run([node, cli] + list(args), capture_output=True, text=True,
+                              timeout=CLI_TIMEOUT, env=cli_env(),
+                              cwd=os.path.dirname(os.path.dirname(os.path.dirname(cli))))
+    except subprocess.TimeoutExpired:
+        raise QuestError("the quest builder did not finish within %d s" % CLI_TIMEOUT)
+    except OSError as exc:
+        raise QuestError("could not start the quest builder: %s" % exc)
+    try:
+        doc = json.loads(proc.stdout)
+    except ValueError:
+        tail = (proc.stderr.strip() or proc.stdout.strip() or "exit %d" % proc.returncode)
+        raise QuestError("the quest builder gave no answer: " + tail[-800:])
+    if not doc.get("ok"):
+        raise QuestError(str(doc.get("error")))
+    return doc["result"]
+
+
+def schema():
+    """JSON Schema of the quest spec, from the builder (one source of truth)."""
+    if "s" not in _schema_cache:
+        _schema_cache["s"] = run_cli(["schema"])
+    return _schema_cache["s"]
+
+
+# --- specs saved with the project ---------------------------------------------------
+
+def tag_from_name(name, prefix="q_"):
+    """The builder's own rule (tagFromName in Q-nwn-mcp's quest-spec.ts)."""
+    slug = re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
+    return (prefix + slug)[:TAG_MAX].rstrip("_")
+
+
+def spec_tag(spec):
+    if not isinstance(spec, dict):
+        raise QuestError("the quest spec must be an object")
+    tag = str(spec.get("tag") or "").strip().lower()
+    if not tag:
+        if not str(spec.get("name") or "").strip():
+            raise QuestError("the quest needs a name")
+        tag = tag_from_name(spec["name"], "b_" if spec.get("template") == "bounty" else "q_")
+    if not TAG_RE.match(tag):
+        raise QuestError("quest tag %r must be lowercase letters, digits and _ (at most %d)"
+                         % (tag, TAG_MAX))
+    return tag
+
+
+def spec_dir(project_root):
+    return os.path.join(project_root, SPEC_DIR)
+
+
+def spec_path(project_root, tag):
+    if not TAG_RE.match(tag or ""):
+        raise QuestError("bad quest tag")
+    return os.path.join(spec_dir(project_root), tag + ".json")
+
+
+def save_spec(project_root, spec):
+    tag = spec_tag(spec)
+    os.makedirs(spec_dir(project_root), exist_ok=True)
+    path = spec_path(project_root, tag)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(spec, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return tag
+
+
+def load_spec(project_root, tag):
+    try:
+        with open(spec_path(project_root, tag), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        raise QuestError("no saved quest %r" % tag)
+
+
+def delete_spec(project_root, tag):
+    try:
+        os.remove(spec_path(project_root, tag))
+    except OSError:
+        raise QuestError("no saved quest %r" % tag)
+
+
+def _val(doc, key):
+    field = doc.get(key) if isinstance(doc, dict) else None
+    return field.get("value") if isinstance(field, dict) else None
+
+
+def _text(loc):
+    """Inline text of a localized string value; '' when it is only a strref."""
+    if isinstance(loc, dict):
+        for key, txt in loc.items():
+            if key != "id" and isinstance(txt, str) and txt:
+                return txt
+        return ""
+    return str(loc or "")
+
+
+def _read(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def journal_quests(unpacked):
+    """Every quest in the module's journal: [{tag, name, entries}]."""
+    doc = _read(os.path.join(unpacked, "module.jrl.json")) or {}
+    out = []
+    for cat in _val(doc, "Categories") or []:
+        tag = str(_val(cat, "Tag") or "")
+        if tag:
+            out.append({"tag": tag, "name": _text(_val(cat, "Name")) or tag,
+                        "entries": len(_val(cat, "EntryList") or [])})
+    return out
+
+
+def list_quests(project_root, unpacked):
+    """Saved specs and journal quests in one list, newest spec first:
+    [{tag, name, saved, built, entries}]. `built` = the journal has it."""
+    journal = {q["tag"].lower(): q for q in journal_quests(unpacked)}
+    out, seen = [], set()
+    folder = spec_dir(project_root)
+    names = sorted((f for f in os.listdir(folder) if f.endswith(".json")),
+                   key=lambda f: os.path.getmtime(os.path.join(folder, f)),
+                   reverse=True) if os.path.isdir(folder) else []
+    for fname in names:
+        tag = fname[:-len(".json")]
+        spec = _read(os.path.join(folder, fname))
+        if spec is None or not TAG_RE.match(tag):
+            continue
+        seen.add(tag)
+        hit = journal.get(tag)
+        out.append({"tag": tag, "name": str(spec.get("name") or tag), "saved": True,
+                    "built": bool(hit), "entries": hit["entries"] if hit else 0})
+    for tag, q in sorted(journal.items()):
+        if tag not in seen:
+            out.append({"tag": q["tag"], "name": q["name"], "saved": False,
+                        "built": True, "entries": q["entries"]})
+    return out
+
+
+# --- pickers: what the module already contains ----------------------------------------
+
+def _resref(fname):
+    return fname.split(".")[0]
+
+
+PICKER_SUFFIXES = (".are.json", ".git.json", ".utc.json", ".uti.json")
+
+
+def _dir_stamp(unpacked):
+    """Changes whenever a file the pickers read is added, removed or rewritten
+    (name, size and mtime of each; a stat per file, no file is opened)."""
+    try:
+        with os.scandir(unpacked) as entries:
+            stamp = sorted((e.name, e.stat().st_mtime_ns, e.stat().st_size)
+                           for e in entries if e.name.endswith(PICKER_SUFFIXES))
+    except OSError:
+        return None
+    return hash(tuple(stamp))
+
+
+def contents(unpacked):
+    """Names a quest can point at, read from unpacked/: areas, creatures, items,
+    placeables and waypoints, each {value, label, area?}. `value` is what the
+    builder accepts: a tag for creatures, placeables and waypoints, a resref
+    for areas and items (the quest runtime compares area resrefs). Cached
+    until one of the files it reads is added, removed or rewritten."""
+    stamp = _dir_stamp(unpacked)
+    hit = _contents_cache.get(unpacked)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    out = {"areas": [], "creatures": [], "items": [], "placeables": [], "waypoints": []}
+    try:
+        files = sorted(os.listdir(unpacked))
+    except OSError:
+        files = []
+    area_names = {}
+    for fname in files:
+        if fname.endswith(".are.json"):
+            doc = _read(os.path.join(unpacked, fname))
+            if doc:
+                resref = _resref(fname)
+                name = _text(_val(doc, "Name")) or str(_val(doc, "Tag") or resref)
+                area_names[resref] = name
+                out["areas"].append({"value": resref, "label": name})
+    seen = {"creatures": set(), "placeables": set(), "waypoints": set()}
+    for fname in files:
+        if not fname.endswith(".git.json"):
+            continue
+        doc = _read(os.path.join(unpacked, fname))
+        if not doc:
+            continue
+        area = area_names.get(_resref(fname), _resref(fname))
+        for key, bucket, name_field in (("Creature List", "creatures", "FirstName"),
+                                        ("Placeable List", "placeables", "LocName"),
+                                        ("WaypointList", "waypoints", "LocalizedName")):
+            for obj in _val(doc, key) or []:
+                tag = str(_val(obj, "Tag") or "")
+                if not tag or tag.lower() in seen[bucket]:
+                    continue
+                seen[bucket].add(tag.lower())
+                label = _text(_val(obj, name_field))
+                if bucket == "creatures":
+                    label = (label + " " + _text(_val(obj, "LastName"))).strip()
+                out[bucket].append({"value": tag, "label": label or tag, "area": area})
+    for fname in files:
+        if fname.endswith(".utc.json"):
+            doc = _read(os.path.join(unpacked, fname))
+            if not doc:
+                continue
+            tag = str(_val(doc, "Tag") or _resref(fname))
+            if tag.lower() in seen["creatures"]:
+                continue
+            seen["creatures"].add(tag.lower())
+            name = (_text(_val(doc, "FirstName")) + " " + _text(_val(doc, "LastName"))).strip()
+            out["creatures"].append({"value": tag, "label": name or tag, "area": "",
+                                     "note": "blueprint, not placed"})
+        elif fname.endswith(".uti.json"):
+            doc = _read(os.path.join(unpacked, fname))
+            if doc:
+                resref = _resref(fname)
+                out["items"].append({"value": resref,
+                                     "label": _text(_val(doc, "LocalizedName"))
+                                     or str(_val(doc, "Tag") or resref)})
+    _contents_cache[unpacked] = (stamp, out)
+    return out
+
+
+# --- plan, stage, compile check, apply ------------------------------------------------
+
+def _spec_file(folder, spec):
+    path = os.path.join(folder, "spec.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(spec, fh)
+    return path
+
+
+def plan(unpacked, spec):
+    """What building `spec` would do. Changes nothing."""
+    spec_tag(spec)
+    with project_lock(unpacked), tempfile.TemporaryDirectory(prefix="nwnmgr-quest-") as tmp:
+        return run_cli(["build", _spec_file(tmp, spec), "--project", unpacked, "--dry-run"])
+
+
+def stage_build(unpacked, spec, out_dir):
+    """Build `spec` into the empty folder `out_dir` (the project is not written)."""
+    spec_tag(spec)
+    with project_lock(unpacked), tempfile.TemporaryDirectory(prefix="nwnmgr-quest-") as tmp:
+        return run_cli(["build", _spec_file(tmp, spec), "--project", unpacked,
+                        "--out", out_dir, "--no-compile"])
+
+
+def stage_remove(unpacked, tag, out_dir):
+    if not TAG_RE.match(tag or ""):
+        raise QuestError("bad quest tag")
+    with project_lock(unpacked):
+        return run_cli(["remove", tag, "--project", unpacked, "--out", out_dir, "--no-compile"])
+
+
+_ENTRY_POINT = re.compile(r"\b(void\s+main|int\s+StartingConditional)\s*\(")
+
+
+def compile_check(staged_dir, unpacked):
+    """Compile the staged scripts that have an entry point, with this repo's
+    nwnsc: the staged folder first, then the project's own scripts, then the
+    base game's. Returns {"checked": n, "ok": bool, "output": str}, or None
+    when nwnsc or the base scripts are not available."""
+    nwnsc, base = _tool("nwnsc", "nwnsc"), base_scripts_dir()
+    if not nwnsc or not base:
+        return None
+    scripts = []
+    for fname in sorted(os.listdir(staged_dir)):
+        if fname.endswith(".nss"):
+            with open(os.path.join(staged_dir, fname), encoding="utf-8", errors="replace") as fh:
+                if _ENTRY_POINT.search(fh.read()):
+                    scripts.append(fname)
+    if not scripts:
+        return {"checked": 0, "ok": True, "output": ""}
+    with tempfile.TemporaryDirectory(prefix="nwnmgr-quest-ncs-") as ncs:
+        include = os.pathsep.join([staged_dir, unpacked, base]) if os.name == "nt" \
+            else ";".join([staged_dir, unpacked, base])
+        try:
+            proc = subprocess.run([nwnsc, "-oqey", "-i", include, "-b", ncs] + scripts,
+                                  cwd=staged_dir, capture_output=True, text=True,
+                                  timeout=COMPILE_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"checked": len(scripts), "ok": False, "output": "nwnsc did not run: %s" % exc}
+        built = {f[:-len(".ncs")] for f in os.listdir(ncs) if f.endswith(".ncs")}
+    missing = [s for s in scripts if s[:-len(".nss")] not in built]
+    output = (proc.stdout + proc.stderr).strip()
+    if missing and not output:
+        output = "not compiled: " + ", ".join(missing)
+    return {"checked": len(scripts), "ok": not missing and proc.returncode == 0, "output": output}
+
+
+def fix_floats(node):
+    """The builder's JSON comes from JavaScript, which writes a whole-number
+    float as `1`. Python would keep that an int and write `1` into a float
+    field where nasher writes `1.0`; make it a float again."""
+    if isinstance(node, dict):
+        if node.get("type") in FLOAT_TYPES and isinstance(node.get("value"), int) \
+                and not isinstance(node.get("value"), bool):
+            node["value"] = float(node["value"])
+        for value in node.values():
+            fix_floats(value)
+    elif isinstance(node, list):
+        for value in node:
+            fix_floats(value)
+    return node
+
+
+def staged_changes(staged_dir, files, target_for):
+    """Compare the staged files with the project. `target_for(name)` gives the
+    path a staged file belongs at. Returns [{name, target, kind, data}] for the
+    files that are new or differ (kind 'json' or 'text'; `data` is what to
+    write) - unchanged files are left out, so they get no history entry."""
+    out = []
+    for name in files:
+        if os.path.basename(name) != name or name.startswith("."):
+            raise QuestError("unexpected staged file name %r" % name)
+        staged = os.path.join(staged_dir, name)
+        target = target_for(name)
+        if name.endswith(".json"):
+            data = fix_floats(_read(staged))
+            if data is None:
+                raise QuestError("staged file %s is not valid JSON" % name)
+            if os.path.isfile(target) and _read(target) == data:
+                continue
+            out.append({"name": name, "target": target, "kind": "json", "data": data,
+                        "new": not os.path.isfile(target)})
+        else:
+            with open(staged, encoding="utf-8", errors="surrogateescape") as fh:
+                text = fh.read()
+            if os.path.isfile(target):
+                with open(target, encoding="utf-8", errors="surrogateescape") as fh:
+                    if fh.read() == text:
+                        continue
+            out.append({"name": name, "target": target, "kind": "text", "data": text,
+                        "new": not os.path.isfile(target)})
+    return out

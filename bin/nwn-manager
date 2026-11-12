@@ -53,7 +53,10 @@ case "$(uname -s 2>/dev/null)" in
   MINGW*|MSYS*|CYGWIN*) _pt_plat=win; _pt_exe=".exe" ;;
   *)      _pt_plat=""; _pt_exe="" ;;
 esac
-if [[ -n ${_pt_plat:-} ]]; then
+# NWN_MANAGER_USE_PYTHON=1 skips the compiled binary and runs the scripts in
+# bin/ with python3: for working on those scripts (the binary only changes
+# when CI rebuilds it) and for a host whose libc is older than the binary's.
+if [[ -n ${_pt_plat:-} && -z ${NWN_MANAGER_USE_PYTHON:-} ]]; then
   for _pt_root in "${NWN_TOOLS_DIR:-}" "$SCRIPT_DIR/../nwn-tools" "$SCRIPT_DIR/../../nwn-tools"; do
     [[ -n $_pt_root ]] || continue
     _pt_cand="$_pt_root/$_pt_plat/nwn-pytools/nwn-pytools$_pt_exe"

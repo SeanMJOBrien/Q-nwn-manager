@@ -42,7 +42,7 @@ HIDDEN_IMPORTS = [
                    # real ModuleNotFoundError at runtime, not just a warning).
     "argparse", "collections", "datetime", "glob", "hashlib", "hmac", "html",
     "http.server", "importlib.machinery", "importlib.util", "json", "math",
-    "mimetypes", "os", "pathlib", "random", "re", "secrets", "shutil",
+    "mimetypes", "os", "pathlib", "platform", "random", "re", "secrets", "shutil",
     "sqlite3", "struct",
     "subprocess", "sys", "tempfile", "threading", "time", "typing",
     "urllib.parse", "uuid",
@@ -58,6 +58,8 @@ a = Analysis(
         (os.path.join(BIN, "check-dlg-integrity"), "."),
         (os.path.join(BIN, "nwn-palette"), "."),
         (os.path.join(BIN, "nwn-common"), "."),
+        (os.path.join(BIN, "nwn-quests"), "."),
+        (os.path.join(BIN, "quest_assets"), "quest_assets"),
         (os.path.join(BIN, "wiki_data"), "wiki_data"),
         (os.path.join(BIN, "wiki_assets"), "wiki_assets"),
     ],
