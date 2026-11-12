@@ -169,6 +169,16 @@ class BridgeTests(FakeCliMixin, unittest.TestCase):
         for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE"):
             os.environ.pop(key, None)
 
+    def test_builder_lookup_prefers_the_vendored_bundle_over_a_checkout(self):
+        lib = CONSOLE.quests_lib()
+        vendored = os.path.join(lib._REPO, "nwn-tools", "quest-cli.mjs")
+        self.assertTrue(os.path.isfile(vendored), "nwn-tools/quest-cli.mjs is vendored")
+        self.assertEqual(lib.cli_path({}), vendored)
+        given = os.path.join(self.cli_dir, "dist", "cli", "quest.js")
+        self.assertEqual(lib.cli_path({"NWN_QUEST_CLI": given}), given)     # the variable wins
+        self.assertTrue(lib._cli_cwd(vendored).endswith("nwn-tools"))
+        self.assertEqual(lib._cli_cwd(given), self.cli_dir)
+
     def test_tag_follows_the_builders_rule(self):
         self.assertEqual(QUESTS.tag_from_name("Wolves at the Fold"), "q_wolves_at_the_fold")
         self.assertEqual(QUESTS.tag_from_name("Garnes and the Missing Ledger"),

@@ -59,11 +59,19 @@ class QuestError(Exception):
 # --- locating the builder and the tools ------------------------------------------
 
 def cli_path(env=None):
+    """The builder: NWN_QUEST_CLI, else the vendored one-file bundle
+    (nwn-tools/quest-cli.mjs, from Q-nwn-mcp's `npm run quest:bundle`), else a
+    built Q-nwn-mcp checkout next to this repo."""
     env = os.environ if env is None else env
     given = env.get("NWN_QUEST_CLI")
-    cands = [os.path.expanduser(given)] if given else [
-        os.path.join(os.path.dirname(_REPO), name, "dist", "cli", "quest.js")
-        for name in ("Q-nwn-mcp", "nwn-mcp")]
+    if given:
+        cands = [os.path.expanduser(given)]
+    else:
+        cands = [os.path.join(root, "quest-cli.mjs") for root in
+                 (env.get("NWN_TOOLS_DIR"), os.path.join(_REPO, "nwn-tools"),
+                  os.path.join(os.path.dirname(_REPO), "nwn-tools")) if root]
+        cands += [os.path.join(os.path.dirname(_REPO), name, "dist", "cli", "quest.js")
+                  for name in ("Q-nwn-mcp", "nwn-mcp")]
     for cand in cands:
         if os.path.isfile(cand):
             return cand
@@ -126,9 +134,9 @@ def info():
     if not node_path():
         problems.append("node was not found on PATH (install Node.js 20 or newer, or set NODE)")
     if not cli_path():
-        problems.append("the quest builder was not found: check out Q-nwn-mcp next to this "
-                        "repo and run `npm install && npm run build` there, or set "
-                        "NWN_QUEST_CLI to its dist/cli/quest.js")
+        problems.append("the quest builder was not found: nwn-tools/quest-cli.mjs is missing "
+                        "(copy it from Q-nwn-mcp's `npm run quest:bundle`), or set NWN_QUEST_CLI "
+                        "to a quest-cli.mjs / dist/cli/quest.js")
     if not cli_env().get("NIM_FOLDER_NWTOOLS"):
         problems.append("nwn_gff was not found (start the console with `nwn-manager console`, "
                         "or set NIM_FOLDER_NWTOOLS)")
@@ -150,6 +158,13 @@ def project_lock(unpacked):
         return _locks.setdefault(key, threading.Lock())
 
 
+def _cli_cwd(cli):
+    """A built checkout runs from its repo root (dist/cli/quest.js); the bundle from its own folder."""
+    if cli.endswith(os.path.join("dist", "cli", "quest.js")):
+        return os.path.dirname(os.path.dirname(os.path.dirname(cli)))
+    return os.path.dirname(os.path.abspath(cli))
+
+
 def run_cli(args):
     """Run the quest CLI; return its `result`, or raise QuestError with its message."""
     cli, node = cli_path(), node_path()
@@ -158,7 +173,7 @@ def run_cli(args):
     try:
         proc = subprocess.run([node, cli] + list(args), capture_output=True, text=True,
                               timeout=CLI_TIMEOUT, env=cli_env(),
-                              cwd=os.path.dirname(os.path.dirname(os.path.dirname(cli))))
+                              cwd=_cli_cwd(cli))
     except subprocess.TimeoutExpired:
         raise QuestError("the quest builder did not finish within %d s" % CLI_TIMEOUT)
     except OSError as exc:

@@ -319,9 +319,11 @@ the Q-nwn-mcp project's quest builder (whole-party quests on the
 engine's own journal; reference: `docs/quest-system.md` there), run through
 its command line; `bin/nwn-quests` is the bridge. Setup:
 
-- Check out Q-nwn-mcp next to this repo and run `npm install && npm run build`
-  there, or set `NWN_QUEST_CLI` to its `dist/cli/quest.js`.
-- Node.js 20 or newer on `PATH` (or `NODE`).
+- The builder ships with this repo as one file, `nwn-tools/quest-cli.mjs`
+  (made by `npm run quest:bundle` in Q-nwn-mcp; refresh it by copying the new
+  `bundle/quest-cli.mjs` over it). Order of lookup: `NWN_QUEST_CLI`, then that
+  file, then a built Q-nwn-mcp checkout next to this repo (`dist/cli/quest.js`).
+- Node.js 20.11 or newer on `PATH` (or `NODE`) - the only thing to install.
 - Optional: `NWN_FOLDER_DATA` = an NWN install. Without it a quest can only
   name creatures and items that are in the module, and cannot place a kill
   target or spawn point by area.

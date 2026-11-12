@@ -76,3 +76,9 @@ it still reports "Success: All executable scripts have a matching compiled
 - Bundled version is **3.47.0** (Oct 2024); latest as of 2026-06-11 is
   **3.53.0.2**. Not updated by this pass — low priority, used for the PW's
   database tooling rather than the build pipeline itself.
+
+## quest-cli.mjs (quest builder for the console Quests page)
+
+Platform-independent, one file, runs with Node 20.11+. Source: Q-nwn-mcp (`src/cli/quest.ts` and the quest builder).
+Refresh: in Q-nwn-mcp run `npm run quest:bundle`, copy `bundle/quest-cli.mjs` over `nwn-tools/quest-cli.mjs` here, then run
+`python3 tests/test_quests.py` and `tests/ui/quests_smoke.js` (on a scratch copy of a project).
