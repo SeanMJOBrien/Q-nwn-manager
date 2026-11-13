@@ -254,6 +254,8 @@ QUEST_CSS = """.q-layout{display:grid;grid-template-columns:15em minmax(0,1fr) 2
  width:100%;box-sizing:border-box;font:inherit}
 .q-field input[type=number]{width:8em} .q-hint{font-size:.85em}
 .q-missing{outline:2px solid #e6a23c}
+.q-map{position:relative;border:1px solid #888;background:#f4f1e8;cursor:crosshair;margin:.4em 0}
+.q-map-hint{margin:.2em 0}
 .q-bad{outline:2px solid #d9534f;border-radius:4px}
 .q-row{display:flex;gap:.3em;align-items:center;flex-wrap:wrap} .q-grow{flex:1}
 .q-group{border-left:3px solid #8886;padding-left:.8em;margin:.3em 0}
@@ -4576,6 +4578,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "info": info,
                                  "schema": lib.schema() if info["ready"] else None,
                                  "quests": lib.list_quests(proj.root, proj.unpacked)})
+            elif sub == "/areaplan":
+                self._send_json({"ok": True, "plan": lib.area_plan(
+                    proj.unpacked, query.get("area", [""])[0])})
             elif sub == "/base":
                 self._send_json({"ok": True, "base": lib.base_contents(proj.unpacked)})
             elif sub == "/contents":

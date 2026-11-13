@@ -51,6 +51,16 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await page.locator('.q-stage').nth(1).locator('[data-q-plain=xp] input').fill('250');
   await page.locator('button', { hasText: 'Persuade or fight' }).click();
   check('a check offers skill and difficulty drop-downs', await page.locator('.q-stage').nth(1).locator('[data-q-field=check] select').count() >= 3);
+  // U2: pick a position on the map
+  await page.locator('button', { hasText: 'Escort' }).click();
+  const areaOpt = await page.evaluate(() => { const o = Array.from(document.querySelectorAll('#q-list-area option')).find(x => x.value); return o && o.value; });
+  const escort = page.locator('.q-stage').nth(1);
+  await escort.locator('input[list=q-list-area]').first().fill(areaOpt);
+  await escort.locator('button', { hasText: 'Pick on map' }).click();
+  await escort.locator('svg.q-map').waitFor({ timeout: 20000 });
+  await escort.locator('svg.q-map').click({ position: { x: 60, y: 40 } });
+  const xv = await escort.locator('[data-q-field=x] input').inputValue();
+  check('a click on the map fills x and y', xv !== '' && (await escort.locator('[data-q-field=y] input').inputValue()) !== '', 'x=' + xv);
   // U4: a builder error outlines its box (a check with a skill but no difficulty or dc)
   await page.locator('button', { hasText: 'Errand' }).click();
   await page.locator('.q-form .card').first().locator('input[type=text]').nth(0).fill('Smoke Test Errand');

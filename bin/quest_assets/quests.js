@@ -271,6 +271,55 @@
       num('gold', 'Reward: gold per player', 'sized by party level'));
   }
 
+  // Position picker: the area drawn to scale with its placed objects; a click fills x and y (metres).
+  function mapPicker(stage, i) {
+    var box = h('div', { class: 'q-map-box' });
+    var btn = h('button', { type: 'button', title: 'Click a spot on the area instead of typing x and y' }, 'Pick on map');
+    btn.addEventListener('click', function () {
+      if (box.firstChild) { clear(box); return; }
+      if (!stage.area) { put(box, h('p', { class: 'warn' }, 'Choose the area first.')); return; }
+      put(box, h('p', { class: 'note' }, 'Loading the area...'));
+      get('/areaplan?area=' + encodeURIComponent(stage.area)).then(function (d) {
+        clear(box);
+        drawMap(box, d.plan, stage);
+      }).catch(function (e) { clear(box); put(box, h('p', { class: 'err' }, e.message)); });
+    });
+    return h('div', {}, btn, box);
+  }
+  function drawMap(box, plan, stage) {
+    if (!plan.w || !plan.h) { put(box, h('p', { class: 'warn' }, 'This area has no size recorded.')); return; }
+    var scale = Math.min(520 / plan.w, 520 / plan.h);
+    var W = Math.round(plan.w * scale), H = Math.round(plan.h * scale);
+    var ns = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('width', W); svg.setAttribute('height', H); svg.setAttribute('class', 'q-map');
+    var COLORS = { creature: '#c0392b', placeable: '#7f8c8d', waypoint: '#2980b9', door: '#8e6b23', trigger: '#27ae60' };
+    plan.objects.forEach(function (o) {
+      var dot = document.createElementNS(ns, 'circle');
+      dot.setAttribute('cx', o.x * scale); dot.setAttribute('cy', H - o.y * scale);
+      dot.setAttribute('r', 3); dot.setAttribute('fill', COLORS[o.kind] || '#555');
+      var tip = document.createElementNS(ns, 'title'); tip.textContent = o.kind + ' ' + o.tag; dot.appendChild(tip);
+      svg.appendChild(dot);
+    });
+    var mark = document.createElementNS(ns, 'circle');
+    mark.setAttribute('r', 6); mark.setAttribute('fill', 'none'); mark.setAttribute('stroke', '#e67e22'); mark.setAttribute('stroke-width', 2);
+    function place(x, y) { mark.setAttribute('cx', x * scale); mark.setAttribute('cy', H - y * scale); mark.style.display = ''; }
+    if (typeof stage.x === 'number' && typeof stage.y === 'number') place(stage.x, stage.y); else mark.style.display = 'none';
+    svg.appendChild(mark);
+    svg.addEventListener('click', function (e) {
+      var r = svg.getBoundingClientRect();
+      var x = Math.round((e.clientX - r.left) / scale * 10) / 10, y = Math.round((H - (e.clientY - r.top)) / scale * 10) / 10;
+      stage.x = x; stage.y = y; place(x, y);
+      var card = box.closest('.q-stage');
+      ['x', 'y'].forEach(function (k) {
+        var inp = card && card.querySelector('[data-q-field=' + k + '] input');
+        if (inp) inp.value = stage[k];
+      });
+      changed();
+    });
+    put(box, h('p', { class: 'note q-map-hint' }, plan.name + ' (' + plan.w + ' x ' + plan.h + ' m). Click to set the spot. Red: creatures, blue: waypoints, grey: placeables, green: triggers, brown: doors.'), svg);
+  }
+
   function stageCard(stage, i) {
     var sdef = defs.StageInput;
     var kind = stage['do'] || 'talk';
@@ -292,6 +341,7 @@
           return h('option', { value: k, selected: k === kind }, KIND_HELP[k] || k);
         }))));
     shown.forEach(function (k) { put(card, field(stage, k, sdef.properties[k], ctx)); });
+    if (shown.indexOf('x') >= 0 && shown.indexOf('y') >= 0) put(card, mapPicker(stage, i));
     if (i === 0) put(card, parcelField(stage, i));
     if (i === spec.stages.length - 1 && i > 0) put(card, rewardFields(stage, i));
     var more = h('details', { class: 'q-more' }, h('summary', { class: 'note' }, 'More options'));

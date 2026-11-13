@@ -250,6 +250,31 @@ def run_cli(args):
     return doc["result"]
 
 
+def area_plan(unpacked, resref):
+    """What the position picker draws for one area: its size in metres (10 per tile) and the
+    objects placed in it ({kind, tag, x, y}), read from <resref>.are.json / .git.json.
+    Raises QuestError when the area has no .are.json here."""
+    resref = os.path.basename(str(resref)).lower()
+    are = _read(os.path.join(unpacked, resref + ".are.json"))
+    if not are:
+        raise QuestError("no area %r in this project" % resref)
+    git = _read(os.path.join(unpacked, resref + ".git.json")) or {}
+    objects = []
+    for key, kind, xk, yk in (("Creature List", "creature", "XPosition", "YPosition"),
+                              ("Placeable List", "placeable", "X", "Y"),
+                              ("WaypointList", "waypoint", "XPosition", "YPosition"),
+                              ("Door List", "door", "X", "Y"),
+                              ("TriggerList", "trigger", "XPosition", "YPosition")):
+        for obj in _val(git, key) or []:
+            x, y = _val(obj, xk), _val(obj, yk)
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                objects.append({"kind": kind, "tag": str(_val(obj, "Tag") or ""),
+                                "x": round(x, 1), "y": round(y, 1)})
+    return {"area": resref, "name": _text(_val(are, "Name")) or resref,
+            "w": int(_val(are, "Width") or 0) * 10, "h": int(_val(are, "Height") or 0) * 10,
+            "objects": objects}
+
+
 _base_cache = {}
 
 

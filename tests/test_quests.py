@@ -450,6 +450,25 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
         out = self.post("/build", spec=json.dumps({"name": "Ghost", "giver": "nobody"}), new="1")
         self.assertEqual(out, {"ok": False, "error": "no creature tagged nobody"})
 
+    def test_8c_area_plan_gives_size_and_objects(self):
+        def loc(v): return {"type": "cexolocstring", "value": {"0": v}}
+        def n(v, t="int"): return {"type": t, "value": v}
+        with open(os.path.join(self.unpacked, "pickarea.are.json"), "w") as fh:
+            json.dump({"Name": loc("Pick Area"), "Width": n(4), "Height": n(3)}, fh)
+        with open(os.path.join(self.unpacked, "pickarea.git.json"), "w") as fh:
+            json.dump({"Creature List": {"type": "list", "value": [
+                {"Tag": n("ned", "cexostring"), "XPosition": n(12.5, "float"), "YPosition": n(7, "float")}]},
+                "Placeable List": {"type": "list", "value": [
+                    {"Tag": n("chest", "cexostring"), "X": n(3, "float"), "Y": n(4, "float")}]}}, fh)
+        plan = CONSOLE.quests_lib().area_plan(self.unpacked, "PickArea")
+        self.assertEqual((plan["name"], plan["w"], plan["h"]), ("Pick Area", 40, 30))
+        self.assertEqual(sorted((o["kind"], o["tag"], o["x"], o["y"]) for o in plan["objects"]),
+                         [("creature", "ned", 12.5, 7.0), ("placeable", "chest", 3.0, 4.0)])
+        with self.assertRaises(CONSOLE.quests_lib().QuestError):
+            CONSOLE.quests_lib().area_plan(self.unpacked, "../etc/passwd")
+        out = json.loads(self.c.get("/quests/areaplan?area=pickarea"))
+        self.assertTrue(out["ok"], out)
+
     def test_8b_a_builder_error_names_its_stage_and_field(self):
         os.environ["FAKE_QUEST_FAIL"] = "stage 2 (kill) needs a target"
         os.environ["FAKE_QUEST_STAGE"], os.environ["FAKE_QUEST_FIELD"] = "2", "target"
