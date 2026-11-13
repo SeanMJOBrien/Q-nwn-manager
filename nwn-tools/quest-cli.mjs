@@ -38,7 +38,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var define_QUEST_SCHEMA_default;
 var init_define_QUEST_SCHEMA = __esm({
   "<define:__QUEST_SCHEMA__>"() {
-    define_QUEST_SCHEMA_default = { $ref: "#/definitions/QuestInput", $schema: "http://json-schema.org/draft-07/schema#", definitions: { QuestInput: { additionalProperties: false, properties: { area: { type: "string" }, autowire: { type: "boolean" }, captive: { type: "string" }, check: { $ref: "#/definitions/StageCheck" }, clues: { items: { additionalProperties: false, properties: { journal: { type: "string" }, use: { type: "string" } }, required: ["use"], type: "object" }, type: "array" }, dest: { additionalProperties: false, properties: { area: { type: "string" }, radius: { type: "number" }, x: { type: "number" }, y: { type: "number" } }, required: ["area"], type: "object" }, giver: { type: "string" }, item: { type: "string" }, itemName: { type: "string" }, journal: { items: { type: "string" }, type: "array" }, level: { type: "number" }, name: { type: "string" }, npc: { type: "string" }, priority: { type: "number" }, reward: { $ref: "#/definitions/StageReward" }, spawn: { $ref: "#/definitions/StageSpawn", description: "Template shortcut: spawn this when the quest is accepted (e.g. the bounty target)." }, stages: { items: { $ref: "#/definitions/StageInput" }, type: "array" }, tag: { type: "string" }, target: { description: "Template fields.", type: "string" }, template: { $ref: "#/definitions/TemplateName" }, thanks: { description: "Thank-you line for the end stage.", type: "string" }, to: { type: "string" } }, required: ["name"], type: "object" }, StageCheck: { additionalProperties: false, properties: { ability: { type: "string" }, assured: { description: "search: succeed anyway once a player's tries are spent, so a required clue can't block the quest (default true).", type: "boolean" }, dc: { description: "A number, or leave out and give `difficulty`.", type: "number" }, difficulty: { description: "easy (10), moderate (15), hard (20) or veryhard (25), instead of dc.", enum: ["easy", "moderate", "hard", "very hard", "veryhard"], type: "string" }, else: { description: 'What a failed check leads to: "fight" (the NPC turns hostile; a kill stage can still finish it), "end" (nothing).', enum: ["fight", "end"], type: "string" }, fail: { type: "string" }, pass: { type: "string" }, prompt: { description: "PC line offering the check.", type: "string" }, save: { type: "string" }, skill: { description: "One of skill, ability (str/dex/con/int/wis/cha) or save (fort/reflex/will); a search stage takes a skill only.", type: "string" }, tries: { description: "search: attempts per player (default 2).", type: "number" } }, type: "object" }, StageExamine: { additionalProperties: false, description: "search: a second check rolled on success by whoever in the party is best at it (e.g. Lore on a found letter's seal).", properties: { dc: { type: "number" }, fail: { type: "string" }, pass: { type: "string" }, skill: { type: "string" }, var: { description: 'Module local string set to "1" on a pass (readable with q_chk var=).', type: "string" } }, required: ["skill", "dc"], type: "object" }, StageInput: { additionalProperties: false, description: "A stage as the model writes it (only `do` and `journal` are needed for most kinds).", properties: { accept: { type: "string" }, acceptReply: { type: "string" }, approach: { description: "Stage 1: the giver walks up to the first player it sees and starts its conversation; a string is a bark as it goes.", type: ["boolean", "string"] }, area: { description: "Area for explore/trigger stages, for placing an unplaced kill target, and an escort's destination.", type: "string" }, arrive: { type: "string" }, check: { $ref: "#/definitions/StageCheck" }, companion: { description: "Talk stage: only offered while this companion (tag) is in the party.", type: "string" }, count: { type: "number" }, decline: { type: "string" }, declineReply: { type: "string" }, dismiss: { description: "Talk stage: this companion (tag) leaves the party when the stage advances and goes to the NPC.", type: "string" }, do: { $ref: "#/definitions/StageKind" }, end: { anyOf: [{ type: "boolean" }, { const: "fail", type: "string" }] }, examine: { $ref: "#/definitions/StageExamine" }, from: { type: "number" }, from_creature: { description: "Where a pickup item is: in this creature's inventory (it drops on death) or this placeable's.", type: "string" }, in: { type: "string" }, item: { description: "Item: picked up (pickup) or handed over (deliver), by resref; `itemName` creates a new quest item.", type: "string" }, itemName: { type: "string" }, join: { description: "The NPC running this talk stage joins the speaker's party as a henchman when it advances.", type: "boolean" }, journal: { type: "string" }, keep: { description: "deliver: the NPC looks at the item but the party keeps it.", type: "boolean" }, leave: { type: "boolean" }, missing: { type: "string" }, n: { type: "number" }, none: { description: "search: text when the placeable is used before the quest reaches this stage.", type: "string" }, offer: { description: "Dialog lines (all optional; defaults are used).", type: "string" }, optional: { description: "search: an optional clue, not a numbered stage \u2014 no journal entry, doesn't move the quest on; available once the quest is at or past `from` (default 1); pays its `reward` to the party once.", type: "boolean" }, plea: { type: "string" }, radius: { type: "number" }, reminder: { type: "string" }, reply: { type: "string" }, reward: { $ref: "#/definitions/StageReward" }, script: { description: "Script run on the advancing object (the NPC) when the stage advances (questK_self_script).", type: "string" }, spawn: { $ref: "#/definitions/StageSpawn", description: "Creature(s) that appear when this stage's line advances the quest." }, target: { description: "Kill target, captive, escorted NPC, or placeable to use (tag or blueprint resref).", type: "string" }, text: { type: "string" }, to: { description: "NPC who runs a talk/deliver stage (tag or blueprint resref); default the giver.", type: "string" }, x: { type: "number" }, y: { type: "number" } }, type: "object" }, StageKind: { enum: ["talk", "return", "kill", "pickup", "explore", "trigger", "use", "search", "deliver", "rescue", "escort", "custom"], type: "string" }, StageReward: { additionalProperties: false, properties: { gold: { type: "number" }, item: { type: "string" }, xp: { description: "Flat XP per player (exact; used by /adventure-rewards), in addition to or instead of a tier.", type: "number" }, xp_level: { type: "number" }, xp_tier: { type: "number" } }, type: "object" }, StageSpawn: { additionalProperties: false, description: "A creature that appears when this stage advances the quest (stage 1 = when the quest is accepted): a bounty target in an area the party has already explored, an ambush, guards, the next part of a multi-part encounter. On a dialog stage it rides on the q_act line; on a kill/pickup/explore/trigger/use/search stage it is written as the slot's questK_spawn locals. A kill stage whose target is this resref or tag needs no placed copy.", properties: { area: { description: "Otherwise: an area (and optionally x,y) where the builder places a waypoint itself, on walkable ground.", type: "string" }, at: { description: "Tag of an existing waypoint to appear at.", type: "string" }, count: { description: "How many (default 1).", type: "number" }, flag: { additionalProperties: false, description: 'The outcome of an earlier part changes this one: a module variable (set by a dialog line\'s `set_var`, e.g. "alarm" raised when the lookout got away) picks the count. `ifSet` is the count when the variable is set (non-empty, not "0"); `ifUnset` when it is not. A count of 0 skips the spawn (the patrol never arrives). Counts are 0-8.', properties: { ifSet: { type: "number" }, ifUnset: { type: "number" }, var: { type: "string" } }, required: ["var"], type: "object" }, hostile: { description: "Hostile faction (default true).", type: "boolean" }, resref: { description: "Creature blueprint resref.", type: "string" }, tag: { description: "Instance tag (default: the blueprint's own). Lets several quests reuse one blueprint.", type: "string" }, x: { type: "number" }, y: { type: "number" } }, required: ["resref"], type: "object" }, TemplateName: { enum: ["fetch", "kill", "deliver", "rescue", "escort", "investigate", "bounty", "persuade-or-fight"], type: "string" } } };
+    define_QUEST_SCHEMA_default = { $ref: "#/definitions/QuestInput", $schema: "http://json-schema.org/draft-07/schema#", definitions: { CheckSkill: { description: "The skill names a check accepts (QuestSkillId in the runtime also takes a skill number).", enum: ["persuade", "bluff", "intimidate", "lore", "search", "spot", "listen", "heal", "spellcraft", "open_lock", "disable_trap", "pick_pocket", "appraise", "animal_empathy", "perform", "taunt", "concentration", "discipline", "hide", "move_silently", "set_trap", "tumble", "use_magic_device", "parry", "craft_trap", "ride"], type: "string" }, QuestInput: { additionalProperties: false, properties: { area: { type: "string" }, autowire: { type: "boolean" }, captive: { type: "string" }, check: { $ref: "#/definitions/StageCheck" }, clues: { items: { additionalProperties: false, properties: { journal: { type: "string" }, use: { type: "string" } }, required: ["use"], type: "object" }, type: "array" }, dest: { additionalProperties: false, properties: { area: { type: "string" }, radius: { type: "number" }, x: { type: "number" }, y: { type: "number" } }, required: ["area"], type: "object" }, giver: { type: "string" }, item: { type: "string" }, itemName: { type: "string" }, journal: { items: { type: "string" }, type: "array" }, level: { type: "number" }, name: { type: "string" }, npc: { type: "string" }, priority: { type: "number" }, reward: { $ref: "#/definitions/StageReward" }, spawn: { $ref: "#/definitions/StageSpawn", description: "Template shortcut: spawn this when the quest is accepted (e.g. the bounty target)." }, stages: { items: { $ref: "#/definitions/StageInput" }, type: "array" }, tag: { type: "string" }, target: { description: "Template fields.", type: "string" }, template: { $ref: "#/definitions/TemplateName" }, thanks: { description: "Thank-you line for the end stage.", type: "string" }, to: { type: "string" } }, required: ["name"], type: "object" }, StageCheck: { additionalProperties: false, properties: { ability: { enum: ["str", "dex", "con", "int", "wis", "cha"], type: "string" }, assured: { description: "search: succeed anyway once a player's tries are spent, so a required clue can't block the quest (default true).", type: "boolean" }, dc: { description: "A number, or leave out and give `difficulty`.", type: "number" }, difficulty: { description: "easy (10), moderate (15), hard (20) or veryhard (25), instead of dc.", enum: ["easy", "moderate", "hard", "very hard", "veryhard"], type: "string" }, else: { description: 'What a failed check leads to: "fight" (the NPC turns hostile; a kill stage can still finish it), "end" (nothing).', enum: ["fight", "end"], type: "string" }, fail: { type: "string" }, pass: { type: "string" }, prompt: { description: "PC line offering the check.", type: "string" }, save: { enum: ["fort", "reflex", "will"], type: "string" }, skill: { $ref: "#/definitions/CheckSkill", description: "One of skill, ability (str/dex/con/int/wis/cha) or save (fort/reflex/will); a search stage takes a skill only." }, tries: { description: "search: attempts per player (default 2).", type: "number" } }, type: "object" }, StageExamine: { additionalProperties: false, description: "search: a second check rolled on success by whoever in the party is best at it (e.g. Lore on a found letter's seal).", properties: { dc: { type: "number" }, fail: { type: "string" }, pass: { type: "string" }, skill: { type: "string" }, var: { description: 'Module local string set to "1" on a pass (readable with q_chk var=).', type: "string" } }, required: ["skill", "dc"], type: "object" }, StageInput: { additionalProperties: false, description: "A stage as the model writes it (only `do` and `journal` are needed for most kinds).", properties: { accept: { type: "string" }, acceptReply: { type: "string" }, approach: { description: "Stage 1: the giver walks up to the first player it sees and starts its conversation; a string is a bark as it goes.", type: ["boolean", "string"] }, area: { description: "Area for explore/trigger stages, for placing an unplaced kill target, and an escort's destination.", type: "string" }, arrive: { type: "string" }, check: { $ref: "#/definitions/StageCheck" }, companion: { description: "Talk stage: only offered while this companion (tag) is in the party.", type: "string" }, count: { type: "number" }, decline: { type: "string" }, declineReply: { type: "string" }, dismiss: { description: "Talk stage: this companion (tag) leaves the party when the stage advances and goes to the NPC.", type: "string" }, do: { $ref: "#/definitions/StageKind" }, end: { anyOf: [{ type: "boolean" }, { const: "fail", type: "string" }] }, examine: { $ref: "#/definitions/StageExamine" }, from: { type: "number" }, from_creature: { description: "Where a pickup item is: in this creature's inventory (it drops on death) or this placeable's.", type: "string" }, in: { type: "string" }, item: { description: "Item: picked up (pickup) or handed over (deliver), by resref; `itemName` creates a new quest item.", type: "string" }, itemName: { type: "string" }, join: { description: "The NPC running this talk stage joins the speaker's party as a henchman when it advances.", type: "boolean" }, journal: { type: "string" }, keep: { description: "deliver: the NPC looks at the item but the party keeps it.", type: "boolean" }, leave: { type: "boolean" }, missing: { type: "string" }, n: { type: "number" }, none: { description: "search: text when the placeable is used before the quest reaches this stage.", type: "string" }, offer: { description: "Dialog lines (all optional; defaults are used).", type: "string" }, optional: { description: "search: an optional clue, not a numbered stage \u2014 no journal entry, doesn't move the quest on; available once the quest is at or past `from` (default 1); pays its `reward` to the party once.", type: "boolean" }, plea: { type: "string" }, radius: { type: "number" }, reminder: { type: "string" }, reply: { type: "string" }, reward: { $ref: "#/definitions/StageReward" }, script: { description: "Script run on the advancing object (the NPC) when the stage advances (questK_self_script).", type: "string" }, spawn: { $ref: "#/definitions/StageSpawn", description: "Creature(s) that appear when this stage's line advances the quest." }, target: { description: "Kill target, captive, escorted NPC, or placeable to use (tag or blueprint resref).", type: "string" }, text: { type: "string" }, to: { description: "NPC who runs a talk/deliver stage (tag or blueprint resref); default the giver.", type: "string" }, x: { type: "number" }, y: { type: "number" } }, type: "object" }, StageKind: { enum: ["talk", "return", "kill", "pickup", "explore", "trigger", "use", "search", "deliver", "rescue", "escort", "custom"], type: "string" }, StageReward: { additionalProperties: false, properties: { gold: { type: "number" }, item: { type: "string" }, xp: { description: "Flat XP per player (exact; used by /adventure-rewards), in addition to or instead of a tier.", type: "number" }, xp_level: { type: "number" }, xp_tier: { type: "number" } }, type: "object" }, StageSpawn: { additionalProperties: false, description: "A creature that appears when this stage advances the quest (stage 1 = when the quest is accepted): a bounty target in an area the party has already explored, an ambush, guards, the next part of a multi-part encounter. On a dialog stage it rides on the q_act line; on a kill/pickup/explore/trigger/use/search stage it is written as the slot's questK_spawn locals. A kill stage whose target is this resref or tag needs no placed copy.", properties: { area: { description: "Otherwise: an area (and optionally x,y) where the builder places a waypoint itself, on walkable ground.", type: "string" }, at: { description: "Tag of an existing waypoint to appear at.", type: "string" }, count: { description: "How many (default 1).", type: "number" }, flag: { additionalProperties: false, description: 'The outcome of an earlier part changes this one: a module variable (set by a dialog line\'s `set_var`, e.g. "alarm" raised when the lookout got away) picks the count. `ifSet` is the count when the variable is set (non-empty, not "0"); `ifUnset` when it is not. A count of 0 skips the spawn (the patrol never arrives). Counts are 0-8.', properties: { ifSet: { type: "number" }, ifUnset: { type: "number" }, var: { type: "string" } }, required: ["var"], type: "object" }, hostile: { description: "Hostile faction (default true).", type: "boolean" }, resref: { description: "Creature blueprint resref.", type: "string" }, tag: { description: "Instance tag (default: the blueprint's own). Lets several quests reuse one blueprint.", type: "string" }, x: { type: "number" }, y: { type: "number" } }, required: ["resref"], type: "object" }, TemplateName: { enum: ["fetch", "kill", "deliver", "rescue", "escort", "investigate", "bounty", "persuade-or-fight"], type: "string" } } };
   }
 });
 
@@ -42314,6 +42314,11 @@ var TEMPLATES = [
   "persuade-or-fight"
 ];
 var QuestSpecError = class extends Error {
+  constructor(message, stage, field) {
+    super(message);
+    this.stage = stage;
+    this.field = field;
+  }
 };
 function tagFromName(name, prefix = "q_") {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -42325,23 +42330,23 @@ function checkDc(c) {
 }
 function validateCheck(c, n, skillOnly) {
   const kinds = [c.skill, c.ability, c.save].filter(Boolean).length;
-  if (kinds !== 1) throw new QuestSpecError(`stage ${n}: a check needs exactly one of skill, ability or save`);
-  if (skillOnly && !c.skill) throw new QuestSpecError(`stage ${n}: a search check is a skill check`);
-  if (c.dc === void 0 && !c.difficulty) throw new QuestSpecError(`stage ${n}: a check needs dc or difficulty`);
+  if (kinds !== 1) throw new QuestSpecError(`stage ${n}: a check needs exactly one of skill, ability or save`, n, "check");
+  if (skillOnly && !c.skill) throw new QuestSpecError(`stage ${n}: a search check is a skill check`, n, "check");
+  if (c.dc === void 0 && !c.difficulty) throw new QuestSpecError(`stage ${n}: a check needs dc or difficulty`, n, "check");
 }
 var SPAWN_KINDS = ["talk", "return", "deliver", "rescue", "kill", "pickup", "explore", "trigger", "use", "search"];
 function validateSpawn(sp, n, kind) {
   if (!SPAWN_KINDS.includes(kind))
-    throw new QuestSpecError(`stage ${n} (${kind}): spawn works on ${SPAWN_KINDS.join(", ")} stages (not escort or custom)`);
-  if (!sp.resref) throw new QuestSpecError(`stage ${n}: spawn needs a resref`);
-  if (!sp.at && !sp.area) throw new QuestSpecError(`stage ${n}: spawn needs an at (waypoint tag) or an area to place one in`);
+    throw new QuestSpecError(`stage ${n} (${kind}): spawn works on ${SPAWN_KINDS.join(", ")} stages (not escort or custom)`, n, "spawn");
+  if (!sp.resref) throw new QuestSpecError(`stage ${n}: spawn needs a resref`, n, "spawn");
+  if (!sp.at && !sp.area) throw new QuestSpecError(`stage ${n}: spawn needs an at (waypoint tag) or an area to place one in`, n, "spawn");
   if (sp.count !== void 0 && (!Number.isInteger(sp.count) || sp.count < 1 || sp.count > 8))
-    throw new QuestSpecError(`stage ${n}: spawn count must be a whole number from 1 to 8`);
+    throw new QuestSpecError(`stage ${n}: spawn count must be a whole number from 1 to 8`, n, "spawn");
   if (sp.flag) {
-    if (!/^[A-Za-z0-9_]{1,32}$/.test(sp.flag.var ?? "")) throw new QuestSpecError(`stage ${n}: spawn flag.var must be a variable name (letters, digits, underscore)`);
+    if (!/^[A-Za-z0-9_]{1,32}$/.test(sp.flag.var ?? "")) throw new QuestSpecError(`stage ${n}: spawn flag.var must be a variable name (letters, digits, underscore)`, n, "spawn");
     for (const [k, v] of [["ifSet", sp.flag.ifSet], ["ifUnset", sp.flag.ifUnset]])
-      if (v !== void 0 && (!Number.isInteger(v) || v < 0 || v > 8)) throw new QuestSpecError(`stage ${n}: spawn flag.${k} must be a whole number from 0 to 8`);
-    if (sp.flag.ifSet === void 0 && sp.flag.ifUnset === void 0) throw new QuestSpecError(`stage ${n}: spawn flag needs ifSet or ifUnset`);
+      if (v !== void 0 && (!Number.isInteger(v) || v < 0 || v > 8)) throw new QuestSpecError(`stage ${n}: spawn flag.${k} must be a whole number from 0 to 8`, n, "spawn");
+    if (sp.flag.ifSet === void 0 && sp.flag.ifUnset === void 0) throw new QuestSpecError(`stage ${n}: spawn flag needs ifSet or ifUnset`, n, "spawn");
   }
 }
 var TAG_RE = /^[a-z][a-z0-9_]*$/;
@@ -42423,7 +42428,7 @@ function expandTemplate(q) {
 function normalizeQuestSpec(input, exists2 = () => false) {
   if (!input || typeof input !== "object") throw new QuestSpecError("spec must be an object");
   const name = (input.name ?? "").trim();
-  if (!name) throw new QuestSpecError("a quest needs a name");
+  if (!name) throw new QuestSpecError("a quest needs a name", void 0, "name");
   const isBounty = input.template === "bounty";
   const tag = (input.tag ?? tagFromName(name, isBounty ? "b_" : "q_")).toLowerCase();
   if (!TAG_RE.test(tag) || tag.length > 27)
@@ -42443,7 +42448,7 @@ function normalizeQuestSpec(input, exists2 = () => false) {
     wire("npc", "npc");
     wire("item", "item");
   }
-  if (!q.giver) throw new QuestSpecError("a quest needs a giver (an NPC tag or blueprint resref)");
+  if (!q.giver) throw new QuestSpecError("a quest needs a giver (an NPC tag or blueprint resref)", void 0, "giver");
   let stagesIn;
   if (q.template) {
     stagesIn = expandTemplate(q);
@@ -42474,31 +42479,31 @@ function normalizeQuestSpec(input, exists2 = () => false) {
     }
     const n = s.n ?? next;
     if (!Number.isInteger(n) || n < 1)
-      throw new QuestSpecError(`stage numbers must be whole numbers from 1 (got ${s.n})`);
+      throw new QuestSpecError(`stage numbers must be whole numbers from 1 (got ${s.n})`, void 0, "n");
     if (s.n === void 0 || s.n >= next) next = n + 1;
     const journal = (s.journal ?? "").trim();
-    if (!journal) throw new QuestSpecError(`stage ${n} (${kind}) needs a journal line`);
+    if (!journal) throw new QuestSpecError(`stage ${n} (${kind}) needs a journal line`, n, "journal");
     if (s.spawn) validateSpawn(s.spawn, n, kind);
     stages.push({ ...s, do: kind, n, from: s.from ?? n - 1, journal, end: s.end ?? false });
   }
   for (const s of stages) if (s.itemName && !s.item) s.item = `${tag.slice(0, 11)}_i${s.n}`;
   for (const s of stages) {
     const need = (field, what) => {
-      if (s[field] === void 0 || s[field] === "") throw new QuestSpecError(`stage ${s.n} (${s.do}) needs ${what}`);
+      if (s[field] === void 0 || s[field] === "") throw new QuestSpecError(`stage ${s.n} (${s.do}) needs ${what}`, s.n, field);
     };
     if (s.do === "kill" || s.do === "rescue" || s.do === "escort" || s.do === "use" || s.do === "search")
       need("target", "a target");
-    if (s.do === "search" && !s.check) throw new QuestSpecError(`stage ${s.n} (search) needs a check {skill, dc}`);
+    if (s.do === "search" && !s.check) throw new QuestSpecError(`stage ${s.n} (search) needs a check {skill, dc}`, s.n, "check");
     if (s.check) validateCheck(s.check, s.n, s.do === "search");
     if (s.do === "pickup" && !s.item && !s.itemName)
-      throw new QuestSpecError(`stage ${s.n} (pickup) needs an item or itemName`);
+      throw new QuestSpecError(`stage ${s.n} (pickup) needs an item or itemName`, s.n, "item");
     if (s.do === "explore" || s.do === "trigger") need("area", "an area");
     if (s.do === "trigger" && (s.x === void 0 || s.y === void 0))
-      throw new QuestSpecError(`stage ${s.n} (trigger) needs x and y`);
+      throw new QuestSpecError(`stage ${s.n} (trigger) needs x and y`, s.n, s.x === void 0 ? "x" : "y");
     if (s.do === "deliver" && !s.item && !s.itemName) {
       const earlier = [...stages].reverse().find((e) => e.n < s.n && (e.reward?.item || e.item || e.itemName));
       if (!earlier)
-        throw new QuestSpecError(`stage ${s.n} (deliver) needs an item (or an earlier stage that gives one)`);
+        throw new QuestSpecError(`stage ${s.n} (deliver) needs an item (or an earlier stage that gives one)`, s.n, "item");
       s.item = earlier.item ?? earlier.reward?.item;
       s.itemName = s.item ? void 0 : earlier.itemName;
     }
@@ -43928,8 +43933,8 @@ async function buildQuestFromJson(spec, dryRun) {
 }
 
 // src/cli/quest.ts
-function out(ok, payload2) {
-  process.stdout.write(`${JSON.stringify(ok ? { ok, result: payload2 } : { ok, error: payload2 }, null, 2)}
+function out(ok, payload2, where) {
+  process.stdout.write(`${JSON.stringify(ok ? { ok, result: payload2 } : { ok, error: payload2, ...where }, null, 2)}
 `);
   process.exit(ok ? 0 : 1);
 }
@@ -44041,7 +44046,7 @@ async function main() {
     try {
       out(true, normalizeQuestSpec(JSON.parse(await fs13.readFile(arg, "utf8"))));
     } catch (e) {
-      if (e instanceof QuestSpecError) out(false, e.message);
+      if (e instanceof QuestSpecError) out(false, e.message, { stage: e.stage, field: e.field });
       throw e;
     }
   }
@@ -44061,7 +44066,14 @@ async function main() {
   const isSource = await loadTarget(project, outDir, writes);
   if (!compile || isSource && !writes) setCompileEnabled(false);
   if (cmd === "build") {
-    const res = await buildQuestFromJson(await fs13.readFile(arg, "utf8"), dryRun);
+    const specText = await fs13.readFile(arg, "utf8");
+    try {
+      normalizeQuestSpec(JSON.parse(specText));
+    } catch (e) {
+      if (e instanceof QuestSpecError) out(false, e.message, { stage: e.stage, field: e.field });
+      throw e;
+    }
+    const res = await buildQuestFromJson(specText, dryRun);
     const text = res.content[0]?.text ?? "";
     if (res.isError) out(false, text);
     out(true, { ...JSON.parse(text), ...isSource && writes ? sourceReport(compile) : {} });

@@ -38,6 +38,15 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await page.waitForFunction(() => document.querySelectorAll('#q-list-creature option').length > 0, null, { timeout: 60000 });
   check('pickers list the module\'s creatures', true);
 
+  // U3: plain fields for the parcel, the reward and the check
+  await page.locator('button', { hasText: 'Deliver' }).click();
+  check('Deliver outline has a plain parcel field on stage 1', await page.locator('.q-stage').nth(0).locator('[data-q-plain=parcel] input').count() === 1);
+  check('the last stage has XP and gold boxes', await page.locator('.q-stage').nth(1).locator('[data-q-plain=xp] input, [data-q-plain=gold] input').count() === 2);
+  await page.locator('.q-stage').nth(0).locator('[data-q-plain=parcel] input').fill('some_parcel');
+  await page.locator('.q-stage').nth(1).locator('[data-q-plain=xp] input').fill('250');
+  await page.locator('button', { hasText: 'Persuade or fight' }).click();
+  check('a check offers skill and difficulty drop-downs', await page.locator('.q-stage').nth(1).locator('[data-q-field=check] select').count() >= 3);
+  // U4: a builder error outlines its box (a check with a skill but no difficulty or dc)
   await page.locator('button', { hasText: 'Errand' }).click();
   await page.locator('.q-form .card').first().locator('input[type=text]').nth(0).fill('Smoke Test Errand');
   await page.locator('.q-form .card').first().locator('input[type=text]').nth(1).fill(GIVER);
@@ -48,6 +57,15 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await stages.nth(2).locator('textarea').first().fill('The errand is done.');
   await page.screenshot({ path: OUT + '/quests-form.png', fullPage: true });
 
+  const checkBox = stages.nth(1).locator('[data-q-field=check]');
+  await checkBox.locator('summary').click();
+  const skillBox = checkBox.locator('label.q-field').filter({ has: page.locator('.q-label', { hasText: /^skill$/ }) }).locator('select');
+  await skillBox.selectOption('persuade');
+  await page.locator('button', { hasText: '1. Check the plan' }).click();
+  await page.waitForSelector('.q-side .err', { timeout: 120000 });
+  check('a builder error is shown', /dc or difficulty/.test(await page.locator('.q-side .err').innerText()));
+  check('the box it is about is outlined', await stages.nth(1).locator('.q-bad[data-q-field=check]').count() === 1);
+  await skillBox.selectOption('');
   const planBtn = page.locator('button', { hasText: '1. Check the plan' });
   check('plan is enabled once filled', await planBtn.isEnabled());
   await planBtn.click();

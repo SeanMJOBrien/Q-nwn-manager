@@ -52,7 +52,11 @@
         throw new Error(res.status === 403 ? 'The console was restarted or this page is old. Reload the page and try again.'
           : 'The console answered with something unexpected (HTTP ' + res.status + ').');
       }
-      if (!doc.ok) throw new Error(doc.error || 'request failed');
+      if (!doc.ok) {
+        var err = new Error(doc.error || 'request failed');
+        err.stage = doc.stage; err.field = doc.field;
+        throw err;
+      }
       return doc;
     });
   }
@@ -141,7 +145,7 @@
       stages: [{ 'do': 'talk', journal: '' }, { 'do': 'talk', to: '', journal: '' }, { 'do': 'return', journal: '' }] }
   ];
   var PRESET_NOTE = {
-    deliver: 'Open "Reward" on stage 1 and pick the parcel under "item": the giver hands it over when the quest is accepted.',
+    deliver: 'On stage 1, pick the parcel under "Item the giver hands over"; then say who gets it on stage 2.',
     fetch: 'On stage 2 say who carries the item or which container holds it.',
     persuade: 'Stages 2 and 3 are two ways to the same point: both carry number 2 (see "n" under More options on the kill stage).'
   };
@@ -189,6 +193,7 @@
       ctx.top && (name === 'name' || name === 'giver');
     var hint = HINTS[(ctx.stageDo || '') + '.' + name] || (LABELS[name] ? '' : d.description || '');
     var note = hint ? h('div', { class: 'note q-hint' }, hint) : null;
+    var where = ctx.group ? {} : { 'data-q-field': name, 'data-q-stage': ctx.stageIdx };
     var input;
     if (d['enum']) {
       input = h('select', { onchange: function (e) { set(e.target.value || undefined); } }, h('option', { value: '' }, '-'),
@@ -216,7 +221,7 @@
           set(value);
         }, k, { stageDo: ctx.stageDo, group: name }));
       });
-      return h('details', { class: 'q-field', open: value !== undefined }, h('summary', {}, label), note, sub);
+      return h('details', Object.assign({ class: 'q-field', open: value !== undefined }, where), h('summary', {}, label), note, sub);
     } else {                     // unions and lists: JSON text
       input = h('input', { type: 'text', value: value === undefined ? '' : JSON.stringify(value), placeholder: 'JSON',
         onchange: function (e) {
@@ -224,7 +229,7 @@
           catch (x) { e.target.classList.add('q-missing'); }
         } });
     }
-    return h('label', { class: 'q-field' }, h('span', { class: 'q-label' }, label, required ? h('span', { class: 'warn' }, ' *') : null), input, note);
+    return h('label', Object.assign({ class: 'q-field' }, where), h('span', { class: 'q-label' }, label, required ? h('span', { class: 'warn' }, ' *') : null), input, note);
   }
   function field(owner, name, def, ctx) {
     return widget(def, owner[name], function (v) {
@@ -238,10 +243,38 @@
   var formEl = h('div', { class: 'q-form' });
   var sideEl = h('div', { class: 'q-side' });
 
+  // "Parcel": the item the giver hands over when the quest is accepted (stage 1's reward.item), as a plain field.
+  function setReward(stage, key, v) {
+    var r = copy(stage.reward || {});
+    if (v === undefined || v === '') delete r[key]; else r[key] = v;
+    if (Object.keys(r).length) stage.reward = r; else delete stage.reward;
+    changed();
+  }
+  function parcelField(stage, i) {
+    return h('label', { class: 'q-field', 'data-q-plain': 'parcel' },
+      h('span', { class: 'q-label' }, 'Item the giver hands over'),
+      h('input', { type: 'text', list: 'q-list-item', value: (stage.reward || {}).item || '',
+        placeholder: 'optional: pick an item, or type its resref',
+        oninput: function (e) { setReward(stage, 'item', e.target.value); } }),
+      h('div', { class: 'note q-hint' }, 'The parcel of a delivery: the player receives it when accepting; a later "hand an item" stage takes it.'));
+  }
+  // The last stage pays the reward: XP and gold per player (leave both empty for the size chosen by party level).
+  function rewardFields(stage, i) {
+    var num = function (key, label, hint) {
+      return h('label', { class: 'q-field', 'data-q-plain': key },
+        h('span', { class: 'q-label' }, label),
+        h('input', { type: 'number', min: 0, value: (stage.reward || {})[key] === undefined ? '' : stage.reward[key],
+          placeholder: hint,
+          oninput: function (e) { setReward(stage, key, e.target.value === '' ? undefined : Number(e.target.value)); } }));
+    };
+    return h('div', { class: 'q-row' }, num('xp', 'Reward: XP per player', 'sized by party level'),
+      num('gold', 'Reward: gold per player', 'sized by party level'));
+  }
+
   function stageCard(stage, i) {
     var sdef = defs.StageInput;
     var kind = stage['do'] || 'talk';
-    var ctx = { stageDo: kind };
+    var ctx = { stageDo: kind, stageIdx: i };
     // Stage 1 is always spoken by the giver, so it has no NPC of its own to choose.
     var shown = ['journal'].concat(i === 0 ? FIRST_STAGE : [], BY_KIND[kind] || []).filter(function (k) {
       return sdef.properties[k] && !(i === 0 && k === 'to');
@@ -259,6 +292,8 @@
           return h('option', { value: k, selected: k === kind }, KIND_HELP[k] || k);
         }))));
     shown.forEach(function (k) { put(card, field(stage, k, sdef.properties[k], ctx)); });
+    if (i === 0) put(card, parcelField(stage, i));
+    if (i === spec.stages.length - 1 && i > 0) put(card, rewardFields(stage, i));
     var more = h('details', { class: 'q-more' }, h('summary', { class: 'note' }, 'More options'));
     Object.keys(sdef.properties).forEach(function (k) {
       if (k !== 'do' && shown.indexOf(k) < 0) put(more, field(stage, k, sdef.properties[k], ctx));
@@ -348,7 +383,23 @@
     });
     return out;
   }
-  function fail(e) { busy = ''; plan = { ok: false, error: e.message }; renderSide(); }
+  function fail(e) {
+    busy = ''; plan = { ok: false, error: e.message, stage: e.stage, field: e.field };
+    renderSide(); markField(e.stage, e.field);
+  }
+  // Outline the box a builder error is about and bring it into view.
+  function markField(stage, field) {
+    var prev = document.querySelectorAll('.q-bad');
+    for (var i = 0; i < prev.length; i++) prev[i].classList.remove('q-bad');
+    if (!field) return;
+    var sel = stage ? '[data-q-stage="' + (stage - 1) + '"][data-q-field="' + field + '"]' : ':not([data-q-stage])[data-q-field="' + field + '"]';
+    var box = formEl.querySelector(sel);
+    if (!box) return;
+    var more = box.closest('details');
+    while (more) { more.open = true; more = more.parentElement && more.parentElement.closest('details'); }
+    box.classList.add('q-bad');
+    box.scrollIntoView({ block: 'center' });
+  }
   function run(dry) {
     if (!dry && !window.confirm('Build "' + spec.name + '" into the module? The files it changes are kept in History, so it can be undone.')) return;
     busy = dry ? 'Checking the plan (reads the whole module, a few seconds)...' : 'Building...';
@@ -435,7 +486,11 @@
       else put(sideEl, h('p', { class: 'note' }, 'Check the plan to see exactly what would be written. Nothing changes until you build.'));
       return;
     }
-    if (!plan.ok) { put(sideEl, h('p', { class: 'err' }, plan.error)); return; }
+    if (!plan.ok) {
+      put(sideEl, h('p', { class: 'err' }, plan.error),
+        plan.field ? h('p', { class: 'note' }, 'The box it is about is outlined in red.') : null);
+      return;
+    }
     if (plan.removed) {
       put(sideEl, h('h3', {}, 'Removed from the module'), fileList(plan.applied));
       return;

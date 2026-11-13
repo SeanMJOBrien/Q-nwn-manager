@@ -53,7 +53,11 @@ if cmd == "verify":
                    "journal": {"errors": [], "warnings": []}})
     out(True, {"tag": args[1], "completable": True, "gaps": [], "journal": {"errors": [], "warnings": []}})
 if os.environ.get("FAKE_QUEST_FAIL"):
-    out(False, os.environ["FAKE_QUEST_FAIL"])
+    where = {}
+    if os.environ.get("FAKE_QUEST_STAGE"):
+        where = {"stage": int(os.environ["FAKE_QUEST_STAGE"]), "field": os.environ["FAKE_QUEST_FIELD"]}
+    sys.stdout.write(json.dumps(dict({"ok": False, "error": os.environ["FAKE_QUEST_FAIL"]}, **where)))
+    sys.exit(1)
 if cmd == "remove":
     with open(os.path.join(project, "module.jrl.json")) as fh:
         jrl = json.load(fh)
@@ -144,7 +148,8 @@ class FakeCliMixin:
             fh.write(FAKE_CLI)
         cls._env = {k: os.environ.get(k) for k in
                     ("NWN_QUEST_CLI", "NODE", "NIM_FOLDER_NWTOOLS", "FAKE_QUEST_FAIL",
-                     "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE")}
+                     "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE",
+                     "FAKE_QUEST_STAGE", "FAKE_QUEST_FIELD")}
         os.environ.update({"NWN_QUEST_CLI": cli, "NODE": sys.executable,
                            "NIM_FOLDER_NWTOOLS": cls.cli_dir})
 
@@ -170,7 +175,8 @@ class BridgeTests(FakeCliMixin, unittest.TestCase):
     def setUp(self):
         self.proj, self.unpacked = make_project()
         self.addCleanup(shutil.rmtree, self.proj, ignore_errors=True)
-        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE"):
+        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE",
+                    "FAKE_QUEST_STAGE", "FAKE_QUEST_FIELD"):
             os.environ.pop(key, None)
 
     def test_builder_lookup_prefers_the_vendored_bundle_over_a_checkout(self):
@@ -336,7 +342,8 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
 
     def setUp(self):
         self.c = Client(self.port, "/quests")
-        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE"):
+        for key in ("FAKE_QUEST_FAIL", "FAKE_QUEST_TOUCH", "FAKE_QUEST_SCRIPT", "FAKE_QUEST_UNCOMPLETABLE",
+                    "FAKE_QUEST_STAGE", "FAKE_QUEST_FIELD"):
             os.environ.pop(key, None)
 
     def read(self, name):
@@ -442,6 +449,12 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
         os.environ["FAKE_QUEST_FAIL"] = "no creature tagged nobody"
         out = self.post("/build", spec=json.dumps({"name": "Ghost", "giver": "nobody"}), new="1")
         self.assertEqual(out, {"ok": False, "error": "no creature tagged nobody"})
+
+    def test_8b_a_builder_error_names_its_stage_and_field(self):
+        os.environ["FAKE_QUEST_FAIL"] = "stage 2 (kill) needs a target"
+        os.environ["FAKE_QUEST_STAGE"], os.environ["FAKE_QUEST_FIELD"] = "2", "target"
+        out = self.post("/plan", spec=json.dumps({"name": "Ghost", "giver": "ned"}))
+        self.assertEqual(out, {"ok": False, "error": "stage 2 (kill) needs a target", "stage": 2, "field": "target"})
 
 
 @unittest.skipUnless(QUESTS._tool("nwnsc", "nwnsc") and QUESTS.base_scripts_dir(),

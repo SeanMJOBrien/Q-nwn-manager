@@ -254,6 +254,7 @@ QUEST_CSS = """.q-layout{display:grid;grid-template-columns:15em minmax(0,1fr) 2
  width:100%;box-sizing:border-box;font:inherit}
 .q-field input[type=number]{width:8em} .q-hint{font-size:.85em}
 .q-missing{outline:2px solid #e6a23c}
+.q-bad{outline:2px solid #d9534f;border-radius:4px}
 .q-row{display:flex;gap:.3em;align-items:center;flex-wrap:wrap} .q-grow{flex:1}
 .q-group{border-left:3px solid #8886;padding-left:.8em;margin:.3em 0}
 .q-more{margin:.6em 0} .q-presets{margin:.4em 0}
@@ -4617,7 +4618,11 @@ class Handler(BaseHTTPRequestHandler):
                 out["quests"] = lib.list_quests(proj.root, proj.unpacked)
             self._send_json(out)
         except (lib.QuestError, common().StaleEditError) as e:
-            self._send_json({"ok": False, "error": str(e)})
+            doc = {"ok": False, "error": str(e)}
+            for key in ("stage", "field"):        # which box of the form it is about, when known
+                if getattr(e, key, None) is not None:
+                    doc[key] = getattr(e, key)
+            self._send_json(doc)
 
     # -- static/download helpers -------------------------------------------
     def _serve_static(self, docroot, rel):

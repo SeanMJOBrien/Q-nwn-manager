@@ -53,7 +53,12 @@ _locks_guard = threading.Lock()
 
 
 class QuestError(Exception):
-    pass
+    """A problem to show the user; `stage` (number) and `field` say which box of the form it is about."""
+
+    def __init__(self, message, stage=None, field=None):
+        Exception.__init__(self, message)
+        self.stage = stage
+        self.field = field
 
 
 # --- locating the builder and the tools ------------------------------------------
@@ -239,7 +244,9 @@ def run_cli(args):
         tail = (proc.stderr.strip() or proc.stdout.strip() or "exit %d" % proc.returncode)
         raise QuestError("the quest builder gave no answer: " + tail[-800:])
     if not doc.get("ok"):
-        raise QuestError(str(doc.get("error")))
+        stage = doc.get("stage")
+        raise QuestError(str(doc.get("error")), stage if isinstance(stage, int) else None,
+                         doc.get("field") if isinstance(doc.get("field"), str) else None)
     return doc["result"]
 
 
