@@ -61,6 +61,16 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await escort.locator('svg.q-map').click({ position: { x: 60, y: 40 } });
   const xv = await escort.locator('[data-q-field=x] input').inputValue();
   check('a click on the map fills x and y', xv !== '' && (await escort.locator('[data-q-field=y] input').inputValue()) !== '', 'x=' + xv);
+  // U5: a quest made elsewhere can be read and adopted as a draft
+  const foreign = page.locator('.q-item', { has: page.locator('.pill', { hasText: 'made elsewhere' }) }).first();
+  if (await foreign.count()) {
+    await foreign.locator('a').click();
+    await page.waitForSelector('.q-journal', { timeout: 20000 });
+    check('a journal quest made elsewhere shows its entries', await page.locator('.q-journal p').count() > 0);
+    await page.locator('button', { hasText: 'Adopt as a draft' }).click();
+    check('adopting fills a draft with one stage per entry', await page.locator('.q-stage').count() > 0 && (await page.locator('.q-form h2').innerText()).startsWith('Quest:'));
+    await page.locator('button', { hasText: '+ New quest' }).click();
+  }
   // U4: a builder error outlines its box (a check with a skill but no difficulty or dc)
   await page.locator('button', { hasText: 'Errand' }).click();
   await page.locator('.q-form .card').first().locator('input[type=text]').nth(0).fill('Smoke Test Errand');

@@ -469,6 +469,28 @@ class ConsoleQuestTests(FakeCliMixin, unittest.TestCase):
         out = json.loads(self.c.get("/quests/areaplan?area=pickarea"))
         self.assertTrue(out["ok"], out)
 
+    def test_8d_journal_quest_made_elsewhere_is_readable_and_adoptable(self):
+        def loc(v): return {"type": "cexolocstring", "value": {"0": v}}
+        def n(v, t="dword"): return {"type": t, "value": v}
+        jrl = os.path.join(self.unpacked, "module.jrl.json")
+        with open(jrl, "w") as fh:
+            json.dump({"Categories": {"type": "list", "value": [{
+                "Tag": n("q_old", "cexostring"), "Name": loc("Old Quest"),
+                "EntryList": {"type": "list", "value": [
+                    {"ID": n(20), "End": n(1, "word"), "Text": loc("Done.")},
+                    {"ID": n(10), "End": n(0, "word"), "Text": loc("Begin.")}]}}]}}, fh)
+        lib = CONSOLE.quests_lib()
+        j = lib.journal_entries(self.unpacked, "Q_OLD")
+        self.assertEqual([e["id"] for e in j["entries"]], [10, 20])
+        self.assertTrue(j["entries"][1]["end"])
+        draft = lib.draft_from_journal(self.unpacked, "q_old")
+        self.assertEqual([(s["do"], s["journal"]) for s in draft["stages"]], [("talk", "Begin."), ("return", "Done.")])
+        self.assertEqual((draft["tag"], draft["giver"]), ("q_old", ""))
+        out = json.loads(self.c.get("/quests/journal?draft=1&tag=q_old"))
+        self.assertEqual(out["draft"]["name"], "Old Quest")
+        with self.assertRaises(lib.QuestError):
+            lib.journal_entries(self.unpacked, "nope")
+
     def test_8b_a_builder_error_names_its_stage_and_field(self):
         os.environ["FAKE_QUEST_FAIL"] = "stage 2 (kill) needs a target"
         os.environ["FAKE_QUEST_STAGE"], os.environ["FAKE_QUEST_FIELD"] = "2", "target"

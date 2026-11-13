@@ -398,15 +398,36 @@
     if (!quests.length) put(listEl, h('p', { class: 'note' }, 'No quests yet.'));
     quests.forEach(function (q) {
       var row = h('div', { class: 'q-item' + (snapshot !== null && spec.tag === q.tag ? ' q-current' : '') },
-        h('div', {}, q.saved ? h('a', { href: '#', onclick: function (e) { e.preventDefault(); leave(function () { open(q.tag); }); } }, q.name) : q.name),
+        h('div', {}, h('a', { href: '#', onclick: function (e) { e.preventDefault(); leave(function () { q.saved ? open(q.tag) : peek(q.tag); }); } }, q.name)),
         h('div', { class: 'note' }, q.tag, ' ',
           q.built ? h('span', { class: 'pill ok' }, 'in the module') : h('span', { class: 'pill' }, 'draft'),
-          q.saved ? null : h('span', { class: 'pill', title: 'This journal quest was not made here, so it cannot be edited here.' }, 'made elsewhere')));
+          q.saved ? null : h('span', { class: 'pill', title: 'This journal quest was not made here: open it to read it, or adopt it as a draft.' }, 'made elsewhere')));
       put(listEl, row);
     });
   }
   function leave(then) {
     if (!dirty() || window.confirm('Discard the changes to this quest?')) then();
+  }
+  // A journal quest made elsewhere: its entries, read-only, and "Adopt" to draft a spec from them.
+  function peek(tag) {
+    get('/journal?draft=1&tag=' + encodeURIComponent(tag)).then(function (d) {
+      var j = d.journal;
+      snapshot = null; spec = blank(); plan = null; presetNote = '';
+      renderList();
+      clear(formEl);
+      put(formEl, h('h2', {}, 'Journal quest: ' + j.name),
+        h('p', { class: 'note' }, 'Made outside this form (tag ' + j.tag + '). Its entries are shown as they are in the module\'s journal; nothing here is changed.'),
+        h('div', { class: 'card q-journal' }, j.entries.map(function (e) {
+          return h('p', {}, h('b', {}, 'Entry ' + e.id + (e.end ? ' (ends the quest)' : '') + ': '), e.text);
+        })),
+        h('p', { class: 'warn' }, 'Adopt drafts a quest from these entries: one stage per entry, the giver left for you to choose. Building the draft later replaces this quest\'s journal entries and dialog lines with the new stages; scripts that advance the old quest are not touched.'),
+        h('button', { type: 'button', onclick: function () {
+          spec = d.draft; snapshot = ''; plan = null;
+          presetNote = 'Drafted from the journal: pick the giver and say what each stage needs, then check the plan.';
+          renderAll();
+        } }, 'Adopt as a draft'));
+      renderSide();
+    }).catch(fail);
   }
   function open(tag) {
     get('/spec?tag=' + encodeURIComponent(tag)).then(function (d) {

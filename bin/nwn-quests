@@ -393,6 +393,36 @@ def journal_quests(unpacked):
     return out
 
 
+def journal_entries(unpacked, tag):
+    """One journal quest as written in module.jrl.json: {tag, name, entries: [{id, text, end}]},
+    in entry order. Raises QuestError when the journal has no such quest."""
+    doc = _read(os.path.join(unpacked, "module.jrl.json")) or {}
+    for cat in _val(doc, "Categories") or []:
+        if str(_val(cat, "Tag") or "").lower() == str(tag).lower():
+            entries = [{"id": int(_val(e, "ID") or 0), "text": _text(_val(e, "Text")),
+                        "end": bool(_val(e, "End"))} for e in _val(cat, "EntryList") or []]
+            entries.sort(key=lambda e: e["id"])
+            return {"tag": str(_val(cat, "Tag")), "name": _text(_val(cat, "Name")) or str(tag),
+                    "entries": entries}
+    raise QuestError("no journal quest %r in this module" % tag)
+
+
+def draft_from_journal(unpacked, tag):
+    """A starting spec for a quest made by hand or by another tool: the journal's wording kept,
+    one stage per entry (the giver's offer, then talk stages, the ending as a return to the
+    giver). Who the giver is and what each step really needs are not in the journal, so the
+    giver is left empty and every stage is a plain talk stage for the author to adjust.
+    Building it later replaces the quest's journal entries with these stages."""
+    q = journal_entries(unpacked, tag)
+    if not q["entries"]:
+        raise QuestError("the journal quest %r has no entries to draft from" % tag)
+    stages = []
+    for i, e in enumerate(q["entries"]):
+        kind = "talk" if i == 0 or i < len(q["entries"]) - 1 or len(q["entries"]) == 1 else "return"
+        stages.append({"do": kind, "journal": e["text"]})
+    return {"name": q["name"], "tag": q["tag"].lower(), "giver": "", "level": 3, "stages": stages}
+
+
 def list_quests(project_root, unpacked):
     """Saved specs and journal quests in one list, newest spec first:
     [{tag, name, saved, built, entries}]. `built` = the journal has it."""

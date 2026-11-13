@@ -4578,6 +4578,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "info": info,
                                  "schema": lib.schema() if info["ready"] else None,
                                  "quests": lib.list_quests(proj.root, proj.unpacked)})
+            elif sub == "/journal":
+                tag = query.get("tag", [""])[0]
+                self._send_json({"ok": True, "journal": lib.journal_entries(proj.unpacked, tag),
+                                 "draft": lib.draft_from_journal(proj.unpacked, tag)
+                                 if query.get("draft", [""])[0] == "1" else None})
             elif sub == "/areaplan":
                 self._send_json({"ok": True, "plan": lib.area_plan(
                     proj.unpacked, query.get("area", [""])[0])})
