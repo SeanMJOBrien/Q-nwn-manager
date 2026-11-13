@@ -38,6 +38,11 @@ const check = (name, ok, extra = '') => { results.push(!!ok); console.log(`${ok 
   await page.waitForFunction(() => document.querySelectorAll('#q-list-creature option').length > 0, null, { timeout: 60000 });
   check('pickers list the module\'s creatures', true);
 
+  // U1: base-game names reach the pick list once the game files are read (only when the console has NWN_FOLDER_DATA)
+  if (process.env.BASE_CREATURE) {
+    await page.waitForFunction((n) => Array.from(document.querySelectorAll('#q-list-creature option')).some(o => o.value === n), process.env.BASE_CREATURE, { timeout: 120000 });
+    check('the creature pick list offers a base-game name', true, process.env.BASE_CREATURE);
+  }
   // U3: plain fields for the parcel, the reward and the check
   await page.locator('button', { hasText: 'Deliver' }).click();
   check('Deliver outline has a plain parcel field on stage 1', await page.locator('.q-stage').nth(0).locator('[data-q-plain=parcel] input').count() === 1);

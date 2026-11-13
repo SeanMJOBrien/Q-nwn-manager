@@ -532,6 +532,19 @@
         return h('option', { value: o.value }, o.label + extra);
       })));
     });
+    return get('/base').catch(function () { return null; });   // slower (reads the game files), so after the rest
+  }).then(function (d) {
+    var b = d && d.base;
+    if (!b) return;
+    [['creature', 'creatures'], ['item', 'items']].forEach(function (pair) {
+      var list = document.getElementById('q-list-' + pair[0]);
+      if (!list) return;
+      var seen = {};
+      for (var i = 0; i < list.options.length; i++) seen[list.options[i].value.toLowerCase()] = true;
+      (b[pair[1]] || []).forEach(function (r) {
+        if (!seen[r]) list.appendChild(h('option', { value: r }, 'base game'));
+      });
+    });
   }).catch(function (e) {
     clear(formEl);
     put(formEl, h('p', { class: 'err' }, e.message));

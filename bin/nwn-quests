@@ -250,6 +250,22 @@ def run_cli(args):
     return doc["result"]
 
 
+_base_cache = {}
+
+
+def base_contents(unpacked):
+    """Base-game creature and item resrefs ({creatures, items, note?}) from the builder's
+    `contents` command: it reads the game files, a few seconds, so it is kept per project
+    for the life of the console. An older builder without the command gives an empty list."""
+    if unpacked not in _base_cache:
+        try:
+            doc = run_cli(["contents", "--project", unpacked])
+        except QuestError as exc:
+            doc = {"creatures": [], "items": [], "note": str(exc)[:200]}
+        _base_cache[unpacked] = doc
+    return _base_cache[unpacked]
+
+
 def schema():
     """JSON Schema of the quest spec, from the builder (one source of truth)."""
     if "s" not in _schema_cache:

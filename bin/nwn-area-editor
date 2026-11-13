@@ -4576,6 +4576,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "info": info,
                                  "schema": lib.schema() if info["ready"] else None,
                                  "quests": lib.list_quests(proj.root, proj.unpacked)})
+            elif sub == "/base":
+                self._send_json({"ok": True, "base": lib.base_contents(proj.unpacked)})
             elif sub == "/contents":
                 self._send_json({"ok": True, "contents": lib.contents(proj.unpacked)})
             elif sub == "/spec":

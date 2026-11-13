@@ -7829,6 +7829,7 @@ import path17 from "path";
 init_define_QUEST_SCHEMA();
 init_config();
 init_nim_tools();
+import { existsSync } from "node:fs";
 import fs9 from "fs/promises";
 import path11 from "path";
 
@@ -8876,7 +8877,8 @@ async function buildResmanOptions(index) {
     userDir: NWN_FOLDER_USER || void 0,
     // Reverse: hakList[0] = highest priority; resman loads later erfs with higher priority
     erfs: hakPaths.length > 0 ? [...hakPaths].reverse() : void 0,
-    dirs: [NWSCRIPT_OVERRIDE_DIR, index.tempDir]
+    // the one-file quest bundle has no nwscript-override next to it; a missing --dirs entry makes resman refuse to start
+    dirs: [...existsSync(NWSCRIPT_OVERRIDE_DIR) ? [NWSCRIPT_OVERRIDE_DIR] : [], index.tempDir]
   };
 }
 async function beginLoad(absPath, opts) {
@@ -43933,9 +43935,20 @@ async function buildQuestFromJson(spec, dryRun) {
 }
 
 // src/cli/quest.ts
+init_nim_tools();
+import { writeSync } from "node:fs";
+import { tmpdir } from "node:os";
 function out(ok, payload2, where) {
-  process.stdout.write(`${JSON.stringify(ok ? { ok, result: payload2 } : { ok, error: payload2, ...where }, null, 2)}
-`);
+  const text = `${JSON.stringify(ok ? { ok, result: payload2 } : { ok, error: payload2, ...where }, null, 2)}
+`;
+  const buf = Buffer.from(text);
+  for (let done = 0; done < buf.length; ) {
+    try {
+      done += writeSync(1, buf, done);
+    } catch (e) {
+      if (e.code !== "EAGAIN") throw e;
+    }
+  }
   process.exit(ok ? 0 : 1);
 }
 function parse3(argv) {
@@ -44023,6 +44036,19 @@ async function verifyQuest(tag) {
     await server.close();
   }
 }
+async function baseGameContents() {
+  const resman = await buildResmanOptions(requireIndex());
+  if (!resman.root && !resman.erfs?.length) {
+    return { creatures: [], items: [], note: "NWN_FOLDER_DATA is not set, so base-game names are not listed" };
+  }
+  try {
+    const lines = (await resmanGrep({ ...resman, userDir: resman.userDir ?? tmpdir() })).split("\n");
+    const pick2 = (ext) => [...new Set(lines.map((l) => l.trim().split(/\s+/)[0] ?? "").filter((n) => n.toLowerCase().endsWith(ext)))].map((n) => n.slice(0, -ext.length).toLowerCase()).sort();
+    return { creatures: pick2(".utc"), items: pick2(".uti") };
+  } catch (e) {
+    return { creatures: [], items: [], note: `could not list the game files: ${e.message.split("\n")[0]}` };
+  }
+}
 async function main() {
   const { cmd, arg, project, out: outDir, dryRun, compile } = parse3(process.argv.slice(2));
   if (cmd === "version") {
@@ -44050,6 +44076,11 @@ async function main() {
       throw e;
     }
   }
+  if (cmd === "contents") {
+    if (!project) out(false, "usage: quest contents --project <dir|.mod>");
+    await loadTarget(project, void 0, false);
+    out(true, await baseGameContents());
+  }
   if (cmd === "verify") {
     if (!arg || !project) out(false, "usage: quest verify <tag> --project <dir|.mod>");
     await loadTarget(project, void 0, false);
@@ -44059,7 +44090,7 @@ async function main() {
   if (!["build", "remove"].includes(cmd) || !arg || !project) {
     out(
       false,
-      "usage: quest build <spec.json> --project <dir|.mod> [--dry-run] [--out <dir>] [--no-compile] | quest remove <tag> --project <dir|.mod> [--out <dir>] | quest verify <tag> --project <dir|.mod> | quest version | quest normalize <spec.json> | quest schema"
+      "usage: quest build <spec.json> --project <dir|.mod> [--dry-run] [--out <dir>] [--no-compile] | quest remove <tag> --project <dir|.mod> [--out <dir>] | quest verify <tag> --project <dir|.mod> | quest contents --project <dir|.mod> | quest version | quest normalize <spec.json> | quest schema"
     );
   }
   const writes = cmd === "remove" || !dryRun;
